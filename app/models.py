@@ -1,0 +1,196 @@
+"""SQLModel data layer for CardScanner.
+
+Designed so that the eBay listing flow is a first-class citizen, not a
+retrofit: every Card has nullable listing fields and a child Listing rows
+for full history.
+"""
+from __future__ import annotations
+
+from datetime import datetime, date
+from typing import Optional
+from sqlmodel import SQLModel, Field
+
+
+# ---------------------------------------------------------------------------
+# Card — one row per individually-tracked baseball card.
+# ---------------------------------------------------------------------------
+class Card(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+
+    # Identification (what Claude vision returns)
+    year: Optional[int] = None
+    set_brand: Optional[str] = None  # "Topps Finest"
+    player: Optional[str] = None
+    card_no: Optional[str] = None  # often alphanumeric e.g. "BCP-12"
+    parallel: Optional[str] = "Base"
+    sport: str = "Baseball"
+    team: Optional[str] = None
+
+    # Condition
+    condition: Optional[str] = None  # NM / EX / VG / GD / PR  or "Graded PSA 9"
+    is_graded: bool = False
+    grade: Optional[str] = None  # "PSA 9" etc.
+    is_autograph: bool = False
+    is_relic: bool = False
+
+    # Valuation
+    est_value_raw: Optional[float] = None
+    est_value_graded: Optional[float] = None
+    comp_median: Optional[float] = None
+    comp_low: Optional[float] = None
+    comp_high: Optional[float] = None
+    comp_count: int = 0
+    comp_url: Optional[str] = None
+    comp_fetched_at: Optional[datetime] = None
+
+    # Storage / status
+    storage: Optional[str] = None
+    status: str = "Researching"  # Researching / Ready / Listed / Sold / Bulk
+    channel: Optional[str] = None  # eBay / Facebook / LCS / etc.
+    notes: Optional[str] = None
+
+    # Hit-watchlist match
+    is_hit_watchlist: bool = False
+    hit_reason: Optional[str] = None
+
+    # Action queue flags
+    needs_photo_verification: bool = False
+    consider_grading: bool = False
+    review_flagged: bool = False  # Claude was unsure
+
+    # Sale outcome
+    sold_price: Optional[float] = None
+    sold_date: Optional[date] = None
+    fee_pct: Optional[float] = None  # 0.13 default for eBay
+
+    # Image filenames (under data/uploads/)
+    front_image: Optional[str] = None
+    back_image: Optional[str] = None
+    front_hash: Optional[str] = Field(default=None, index=True)
+    back_hash: Optional[str] = Field(default=None, index=True)
+    drive_front_id: Optional[str] = None
+    drive_back_id: Optional[str] = None
+
+    # Source scan job (for traceability)
+    scan_job_id: Optional[int] = Field(default=None, foreign_key="scanjob.id")
+
+    # eBay listing summary (denormalised for fast reads on the dashboard)
+    ebay_status: str = "not_listed"  # not_listed / drafted / active / sold / ended
+    ebay_listing_id: Optional[str] = None
+    ebay_offer_id: Optional[str] = None
+
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+    # ------------------------------------------------------------------
+    def display_title(self) -> str:
+        bits = []
+        if self.year:
+            bits.append(str(self.year))
+        if self.set_brand:
+            bits.append(self.set_brand)
+        if self.player:
+            bits.append(self.player)
+        if self.card_no:
+            bits.append(f"#{self.card_no}")
+        if self.parallel and self.parallel.lower() != "base":
+            bits.append(self.parallel)
+        return " ".join(bits) if bits else f"Untitled Card #{self.id}"
+
+    def era(self) -> str:
+        y = self.year or 0
+        if y == 0:
+            return "Unknown"
+        if y < 1986:
+            return "Vintage (pre-1986)"
+        if y < 1992:
+            return "Junk Wax (1986-1991)"
+        if y < 2000:
+            return "Transitional (1992-1999)"
+        if y < 2015:
+            return "Modern (2000-2014)"
+        return "Ultra-Modern (2015+)"
+
+
+# ---------------------------------------------------------------------------
+# ScanJob — represents one bulk-upload batch.
+# ---------------------------------------------------------------------------
+class ScanJob(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    label: Optional[str] = None
+    status: str = "queued"  # queued / processing / done / error
+    total: int = 0
+    processed: int = 0
+    failed: int = 0
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+# ---------------------------------------------------------------------------
+# AchievementUnlock — log of unlocked achievements (one row per unlock).
+# ---------------------------------------------------------------------------
+class AchievementUnlock(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    code: str = Field(index=True)  # matches catalog code
+    unlocked_at: datetime = Field(default_factory=datetime.utcnow)
+    seen: bool = False  # has the user seen the celebration?
+    payload: Optional[str] = None  # JSON metadata e.g. card id
+
+
+# ---------------------------------------------------------------------------
+# DailyActivity — used to compute daily streak.
+# ---------------------------------------------------------------------------
+class DailyActivity(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    day: date = Field(index=True, unique=True)
+    cards_added: int = 0
+
+
+# ---------------------------------------------------------------------------
+# Listing — full history of eBay listings per card.
+# ---------------------------------------------------------------------------
+class Listing(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    card_id: int = Field(foreign_key="card.id", index=True)
+
+    marketplace: str = "ebay"
+    environment: str = "sandbox"  # sandbox or production
+
+    # eBay identifiers (filled in as the lifecycle progresses)
+    sku: Optional[str] = None
+    offer_id: Optional[str] = None
+    listing_id: Optional[str] = None
+
+    # Listing template / what we sent
+    title: Optional[str] = None
+    format: str = "AUCTION"  # AUCTION or FIXED_PRICE
+    price: Optional[float] = None  # BIN price OR auction start price
+    duration: str = "DAYS_7"
+    category_id: Optional[str] = None
+    description: Optional[str] = None
+
+    status: str = "draft"  # draft / active / sold / ended / error
+    error_message: Optional[str] = None
+
+    # Sale outcome
+    sold_price: Optional[float] = None
+    sold_at: Optional[datetime] = None
+    fees: Optional[float] = None
+
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+# ---------------------------------------------------------------------------
+# Hit Watchlist — pre-populated from Connor's existing tab.
+# ---------------------------------------------------------------------------
+class HitWatchlistEntry(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    year_min: Optional[int] = None
+    year_max: Optional[int] = None
+    set_pattern: Optional[str] = None  # case-insensitive substring
+    player_pattern: Optional[str] = None
+    card_no: Optional[str] = None
+    typical_value: Optional[float] = None
+    reason: Optional[str] = None

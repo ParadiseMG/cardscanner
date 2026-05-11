@@ -1,0 +1,428 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>CardScanner — Danu</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.9.3/dist/confetti.browser.min.js"></script>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen">
+
+<div x-data="cardscanner()" x-init="init()" class="max-w-7xl mx-auto px-6 py-6">
+
+  <!-- header -->
+  <header class="flex items-center justify-between mb-6">
+    <div class="flex items-center gap-3">
+      <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-fuchsia-500 to-amber-400 grid place-items-center font-black text-slate-900 text-xl">D</div>
+      <div>
+        <h1 class="text-2xl font-bold tracking-tight">CardScanner <span class="text-xs font-medium text-slate-400">by Danu</span></h1>
+        <p class="text-xs text-slate-400">Drop card photos → auto-identify → comp lookup → eBay-ready listings</p>
+      </div>
+    </div>
+    <div class="flex items-center gap-3 text-sm">
+      <span class="px-2 py-1 rounded bg-slate-800" x-text="'Streak: '+(stats.streak_days||0)+'d 🔥'"></span>
+      <button @click="openSettings=true" class="px-3 py-1.5 rounded bg-slate-800 hover:bg-slate-700">⚙︎ Settings</button>
+    </div>
+  </header>
+
+  <!-- tabs -->
+  <nav class="flex gap-1 mb-4 border-b border-slate-800">
+    <template x-for="t in ['Dashboard','Inventory','Listings','Achievements']" :key="t">
+      <button @click="tab=t"
+              :class="tab===t ? 'text-fuchsia-300 border-b-2 border-fuchsia-400' : 'text-slate-400 hover:text-slate-200'"
+              class="px-4 py-2 text-sm font-medium" x-text="t"></button>
+    </template>
+  </nav>
+
+  <!-- ============================================================ DASHBOARD -->
+  <section x-show="tab==='Dashboard'" x-transition>
+
+    <!-- stat cards -->
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
+      <div class="rounded-xl bg-slate-900 border border-slate-800 p-4">
+        <div class="text-xs text-slate-400 uppercase tracking-wide">Total cards</div>
+        <div class="text-3xl font-bold mt-1" x-text="stats.total_cards||0"></div>
+      </div>
+      <div class="rounded-xl bg-slate-900 border border-slate-800 p-4">
+        <div class="text-xs text-slate-400 uppercase tracking-wide">Estimated value</div>
+        <div class="text-3xl font-bold mt-1 text-emerald-300" x-text="'$'+formatNum(stats.total_value||0)"></div>
+        <div class="mt-2"><div class="h-1.5 bg-slate-800 rounded overflow-hidden">
+          <div class="h-full bg-emerald-400" :style="'width:'+valueProgress()+'%'"></div>
+        </div></div>
+        <div class="text-xs text-slate-500 mt-1" x-text="nextMilestone()"></div>
+      </div>
+      <div class="rounded-xl bg-slate-900 border border-slate-800 p-4">
+        <div class="text-xs text-slate-400 uppercase tracking-wide">Hit rate</div>
+        <div class="text-3xl font-bold mt-1 text-amber-300" x-text="(stats.hit_rate||0)+'%'"></div>
+        <div class="text-xs text-slate-500 mt-1" x-text="(stats.hit_count||0)+' Hit Watchlist matches'"></div>
+      </div>
+      <div class="rounded-xl bg-slate-900 border border-slate-800 p-4">
+        <div class="text-xs text-slate-400 uppercase tracking-wide">Top card</div>
+        <div class="text-base font-semibold mt-1" x-text="stats.highest_value_card?.title || '—'"></div>
+        <div class="text-xs text-slate-500 mt-1" x-text="stats.highest_value_card?.value ? ('$'+formatNum(stats.highest_value_card.value)) : ''"></div>
+      </div>
+    </div>
+
+    <!-- Drive inbox -->
+    <div class="rounded-2xl bg-gradient-to-br from-slate-900 to-slate-950 border border-slate-800 p-6 mb-4">
+      <div class="flex items-center justify-between">
+        <div>
+          <h2 class="text-lg font-semibold">📂 Drive inbox</h2>
+          <p class="text-sm text-slate-400 mt-1">
+            Drop card photos into <span class="font-mono text-fuchsia-300">Baseball Cards / To Be Processed</span> in your Drive.
+            Pair sides with <span class="font-mono">_front</span> / <span class="font-mono">_back</span> suffixes; otherwise process single-sided.
+          </p>
+          <p class="text-xs text-slate-500 mt-2">
+            <span x-show="drive.connected">📥 <span x-text="drive.inbox_count || 0"></span> photo(s) waiting · <span x-text="drive.pair_count || 0"></span> card(s) to process</span>
+            <span x-show="!drive.connected" class="text-amber-300">Google not connected. Open Settings to authorize.</span>
+          </p>
+        </div>
+        <div class="flex flex-col items-end gap-2">
+          <button @click="syncDrive()" :disabled="!drive.connected || job"
+                  class="px-5 py-2.5 rounded-lg bg-fuchsia-600 hover:bg-fuchsia-500 disabled:opacity-50 disabled:cursor-not-allowed font-medium">
+            Sync new cards →
+          </button>
+          <label class="flex items-center gap-2 text-xs text-slate-400">
+            <input type="checkbox" x-model="autoPoll" @change="toggleAutoPoll()"> auto-sync every 5 min
+          </label>
+        </div>
+      </div>
+    </div>
+
+    <!-- upload zone (fallback) -->
+    <details class="rounded-xl bg-slate-900/50 border border-slate-800 p-4 mb-6">
+      <summary class="cursor-pointer text-sm text-slate-400 hover:text-slate-200">📎 Or upload files directly (fallback)</summary>
+      <div class="mt-4 rounded-2xl border-2 border-dashed border-slate-700 hover:border-fuchsia-500 transition-all p-6"
+         @dragover.prevent="dragOver=true" @dragleave.prevent="dragOver=false"
+         @drop.prevent="onDrop($event)" :class="dragOver ? 'border-fuchsia-400 bg-slate-900' : ''">
+      <div class="text-center">
+        <div class="text-3xl mb-2">🎴</div>
+        <p class="text-sm text-slate-400">Drag & drop, or:</p>
+        <div class="mt-3">
+          <label class="inline-block px-4 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 cursor-pointer text-sm">
+            Choose files
+            <input type="file" multiple accept="image/*" class="hidden" @change="onFiles($event.target.files)">
+          </label>
+        </div>
+      </div>
+
+      </div>
+    </details>
+
+    <!-- progress (shared) -->
+    <template x-if="job">
+      <div class="mb-6 rounded-xl bg-slate-900 border border-fuchsia-500/40 p-4 max-w-2xl mx-auto">
+        <div class="flex justify-between text-xs text-slate-400 mb-1">
+          <span x-text="job.label || 'Processing batch'"></span>
+          <span x-text="job.processed+' / '+job.total"></span>
+        </div>
+        <div class="h-3 bg-slate-800 rounded-full overflow-hidden">
+          <div class="h-full bg-gradient-to-r from-fuchsia-500 to-amber-400 transition-all"
+               :style="'width:'+(job.total ? (job.processed/job.total*100):0)+'%'"></div>
+        </div>
+        <div class="text-xs text-slate-400 mt-2 text-center"
+             x-text="job.status==='done' ? '✓ Done. '+(job.failed?job.failed+' failed':'') : 'Identifying & looking up comps...'"></div>
+      </div>
+    </template>
+
+    <!-- insights + action queue -->
+    <div class="grid md:grid-cols-3 gap-4 mb-6">
+      <div class="md:col-span-2 rounded-xl bg-slate-900 border border-slate-800 p-4">
+        <h3 class="font-semibold mb-3">💡 Smart insights</h3>
+        <template x-if="!insights.length"><p class="text-sm text-slate-500">Add a few cards and your insights will start showing up here.</p></template>
+        <ul class="space-y-2">
+          <template x-for="ins in insights" :key="ins.headline">
+            <li class="flex gap-3 text-sm">
+              <span x-text="ins.icon"></span>
+              <div>
+                <div class="font-medium" x-text="ins.headline"></div>
+                <div class="text-xs text-slate-400" x-text="ins.detail"></div>
+              </div>
+            </li>
+          </template>
+        </ul>
+      </div>
+      <div class="rounded-xl bg-slate-900 border border-slate-800 p-4">
+        <h3 class="font-semibold mb-3">🧭 Action queue</h3>
+        <ul class="space-y-2 text-sm">
+          <li class="flex justify-between"><span>Needs review</span><span class="font-mono text-amber-300" x-text="actionQ.needs_review?.length || 0"></span></li>
+          <li class="flex justify-between"><span>Consider grading</span><span class="font-mono text-emerald-300" x-text="actionQ.consider_grading?.length || 0"></span></li>
+          <li class="flex justify-between"><span>Photo verification</span><span class="font-mono text-fuchsia-300" x-text="actionQ.needs_photo_verification?.length || 0"></span></li>
+        </ul>
+        <button @click="tab='Inventory'; filterReview=true" class="mt-3 w-full text-xs px-3 py-2 rounded bg-slate-800 hover:bg-slate-700">Open in inventory →</button>
+      </div>
+    </div>
+
+    <!-- charts -->
+    <div class="grid md:grid-cols-2 gap-4 mb-6">
+      <div class="rounded-xl bg-slate-900 border border-slate-800 p-4">
+        <h3 class="font-semibold mb-3">Era distribution</h3>
+        <canvas id="eraChart" height="180"></canvas>
+      </div>
+      <div class="rounded-xl bg-slate-900 border border-slate-800 p-4">
+        <h3 class="font-semibold mb-3">Top players</h3>
+        <canvas id="playerChart" height="180"></canvas>
+      </div>
+    </div>
+
+    <!-- recent scans -->
+    <div class="rounded-xl bg-slate-900 border border-slate-800 p-4">
+      <div class="flex justify-between items-center mb-3">
+        <h3 class="font-semibold">Recent scans</h3>
+        <button @click="loadRecent()" class="text-xs text-slate-400 hover:text-slate-200">refresh</button>
+      </div>
+      <div class="grid grid-cols-2 md:grid-cols-5 gap-3">
+        <template x-for="c in recent" :key="c.id">
+          <div class="rounded-lg bg-slate-800 border border-slate-700 p-3 hover:border-fuchsia-500 cursor-pointer"
+               @click="openCard(c)">
+            <div class="text-xs text-slate-400 truncate" x-text="c.title"></div>
+            <div class="text-lg font-bold mt-1" x-text="'$'+formatNum(c.comp_median||c.est_value_raw||0)"></div>
+            <div class="text-xs mt-1">
+              <span x-show="c.is_hit_watchlist" class="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300">HIT</span>
+              <span x-show="c.review_flagged" class="px-1.5 py-0.5 rounded bg-rose-500/20 text-rose-300">review</span>
+              <span x-show="c.is_autograph" class="px-1.5 py-0.5 rounded bg-fuchsia-500/20 text-fuchsia-300">auto</span>
+              <span x-show="c.is_relic" class="px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300">relic</span>
+            </div>
+          </div>
+        </template>
+        <template x-if="!recent.length">
+          <div class="col-span-full text-center text-sm text-slate-500 py-6">No scans yet — drop some images above to get started.</div>
+        </template>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================================ INVENTORY -->
+  <section x-show="tab==='Inventory'" x-transition>
+    <div class="flex items-center gap-3 mb-4">
+      <input x-model="search" @input.debounce.300="loadInventory()" placeholder="Search player or set..."
+             class="flex-1 px-3 py-2 rounded bg-slate-900 border border-slate-800 text-sm">
+      <label class="text-sm flex items-center gap-2">
+        <input type="checkbox" x-model="filterHits" @change="loadInventory()"> Hits only
+      </label>
+      <label class="text-sm flex items-center gap-2">
+        <input type="checkbox" x-model="filterReview" @change="loadInventory()"> Needs review
+      </label>
+    </div>
+    <div class="rounded-xl bg-slate-900 border border-slate-800 overflow-hidden">
+      <table class="w-full text-sm">
+        <thead class="bg-slate-800 text-slate-300">
+          <tr>
+            <th class="text-left px-3 py-2"><input type="checkbox" @change="toggleAll($event)"></th>
+            <th class="text-left px-3 py-2">Card</th>
+            <th class="text-right px-3 py-2">Comp $</th>
+            <th class="text-left px-3 py-2">Status</th>
+            <th class="text-left px-3 py-2">eBay</th>
+            <th class="text-left px-3 py-2">Tags</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          <template x-for="c in inventory" :key="c.id">
+            <tr class="border-t border-slate-800 hover:bg-slate-800/50">
+              <td class="px-3 py-2"><input type="checkbox" :value="c.id" x-model="selectedIds"></td>
+              <td class="px-3 py-2">
+                <div class="font-medium" x-text="c.title"></div>
+                <div class="text-xs text-slate-500" x-text="c.era + (c.condition?(' · '+c.condition):'')"></div>
+              </td>
+              <td class="px-3 py-2 text-right font-mono" x-text="'$'+formatNum(c.comp_median||c.est_value_raw||0)"></td>
+              <td class="px-3 py-2 text-xs" x-text="c.status"></td>
+              <td class="px-3 py-2 text-xs">
+                <span x-text="c.ebay_status"></span>
+              </td>
+              <td class="px-3 py-2 text-xs">
+                <span x-show="c.is_hit_watchlist" class="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300">HIT</span>
+                <span x-show="c.is_autograph" class="px-1.5 py-0.5 rounded bg-fuchsia-500/20 text-fuchsia-300">auto</span>
+                <span x-show="c.is_relic" class="px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300">relic</span>
+                <span x-show="c.is_graded" class="px-1.5 py-0.5 rounded bg-cyan-500/20 text-cyan-300">graded</span>
+              </td>
+              <td class="px-3 py-2 text-right">
+                <button @click="openCard(c)" class="text-xs px-2 py-1 rounded bg-slate-800 hover:bg-slate-700">edit</button>
+                <button @click="previewListing(c)" class="text-xs px-2 py-1 rounded bg-fuchsia-600/30 hover:bg-fuchsia-600/50 text-fuchsia-200">eBay</button>
+              </td>
+            </tr>
+          </template>
+          <template x-if="!inventory.length">
+            <tr><td colspan="7" class="text-center text-slate-500 py-6">No matching cards.</td></tr>
+          </template>
+        </tbody>
+      </table>
+    </div>
+    <div class="mt-3 flex justify-between items-center text-sm" x-show="selectedIds.length">
+      <span x-text="selectedIds.length + ' selected'"></span>
+      <button @click="bulkList()" class="px-3 py-1.5 rounded bg-fuchsia-600 hover:bg-fuchsia-500">List selected on eBay</button>
+    </div>
+  </section>
+
+  <!-- ============================================================ LISTINGS -->
+  <section x-show="tab==='Listings'" x-transition>
+    <div class="flex justify-between mb-4">
+      <h2 class="text-lg font-semibold">eBay listings</h2>
+      <div class="text-xs text-slate-400">env: <span class="text-amber-300" x-text="env.ebay_env || 'sandbox'"></span></div>
+    </div>
+    <div class="rounded-xl bg-slate-900 border border-slate-800 overflow-hidden">
+      <table class="w-full text-sm">
+        <thead class="bg-slate-800 text-slate-300"><tr>
+          <th class="text-left px-3 py-2">Card</th>
+          <th class="text-left px-3 py-2">Format</th>
+          <th class="text-right px-3 py-2">Price</th>
+          <th class="text-left px-3 py-2">Status</th>
+          <th class="text-left px-3 py-2">SKU / Listing</th>
+          <th></th>
+        </tr></thead>
+        <tbody>
+          <template x-for="L in listings" :key="L.id">
+            <tr class="border-t border-slate-800">
+              <td class="px-3 py-2" x-text="L.card_title || L.title"></td>
+              <td class="px-3 py-2 text-xs" x-text="L.format"></td>
+              <td class="px-3 py-2 text-right font-mono" x-text="'$'+formatNum(L.price||0)"></td>
+              <td class="px-3 py-2 text-xs">
+                <span class="px-1.5 py-0.5 rounded"
+                      :class="{
+                        'bg-slate-700 text-slate-300': L.status==='draft',
+                        'bg-emerald-500/20 text-emerald-300': L.status==='active',
+                        'bg-amber-500/20 text-amber-300': L.status==='sold',
+                        'bg-rose-500/20 text-rose-300': L.status==='error'
+                      }" x-text="L.status"></span>
+              </td>
+              <td class="px-3 py-2 text-xs font-mono text-slate-400" x-text="L.listing_id || L.sku"></td>
+              <td class="px-3 py-2 text-right">
+                <button x-show="L.status==='active'" @click="markSold(L)" class="text-xs px-2 py-1 rounded bg-amber-600/30 hover:bg-amber-600/50 text-amber-200">mark sold</button>
+              </td>
+            </tr>
+          </template>
+          <template x-if="!listings.length">
+            <tr><td colspan="6" class="text-center text-slate-500 py-6">No listings yet. Click "eBay" on any inventory row to draft one.</td></tr>
+          </template>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ============================================================ ACHIEVEMENTS -->
+  <section x-show="tab==='Achievements'" x-transition>
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+      <template x-for="a in achievements" :key="a.code">
+        <div class="rounded-xl border p-4 transition-all"
+             :class="a.unlocked ? 'bg-gradient-to-br from-amber-500/10 to-fuchsia-500/10 border-amber-500/40' : 'bg-slate-900 border-slate-800 opacity-60'">
+          <div class="text-3xl mb-1" x-text="a.icon"></div>
+          <div class="font-semibold" x-text="a.title"></div>
+          <div class="text-xs text-slate-400 mt-1" x-text="a.description"></div>
+          <div class="mt-2 text-[10px] uppercase tracking-wider"
+               :class="a.tier==='legendary'?'text-fuchsia-300':a.tier==='gold'?'text-amber-300':a.tier==='silver'?'text-slate-200':'text-slate-500'"
+               x-text="a.tier"></div>
+        </div>
+      </template>
+    </div>
+  </section>
+
+  <!-- card edit modal -->
+  <div x-show="editing" x-cloak class="fixed inset-0 bg-slate-950/80 backdrop-blur grid place-items-center z-40 p-6"
+       @keydown.escape.window="editing=null">
+    <div class="bg-slate-900 border border-slate-700 rounded-xl p-5 max-w-lg w-full" @click.outside="editing=null" x-show="editing">
+      <h3 class="font-semibold mb-3" x-text="editing?.title"></h3>
+      <div class="grid grid-cols-2 gap-3 text-sm" x-show="editing">
+        <label class="block">Year<input type="number" x-model.number="editing.year" class="mt-1 w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700"></label>
+        <label class="block">Set<input x-model="editing.set_brand" class="mt-1 w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700"></label>
+        <label class="block">Player<input x-model="editing.player" class="mt-1 w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700"></label>
+        <label class="block">Card #<input x-model="editing.card_no" class="mt-1 w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700"></label>
+        <label class="block">Parallel<input x-model="editing.parallel" class="mt-1 w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700"></label>
+        <label class="block">Condition<input x-model="editing.condition" class="mt-1 w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700"></label>
+        <label class="block">Est value<input type="number" step="0.01" x-model.number="editing.est_value_raw" class="mt-1 w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700"></label>
+        <label class="block">Status<input x-model="editing.status" class="mt-1 w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700"></label>
+        <label class="col-span-2 block">Notes<textarea x-model="editing.notes" rows="2" class="mt-1 w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700"></textarea></label>
+      </div>
+      <div class="flex justify-between mt-4">
+        <button @click="deleteCard()" class="text-xs text-rose-400 hover:text-rose-200">delete</button>
+        <div class="flex gap-2">
+          <button @click="editing=null" class="px-3 py-1.5 rounded bg-slate-800">cancel</button>
+          <button @click="saveCard()" class="px-3 py-1.5 rounded bg-fuchsia-600 hover:bg-fuchsia-500">save</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- listing preview modal -->
+  <div x-show="listingPreview" x-cloak class="fixed inset-0 bg-slate-950/80 backdrop-blur grid place-items-center z-40 p-6">
+    <div class="bg-slate-900 border border-slate-700 rounded-xl p-5 max-w-2xl w-full" @click.outside="listingPreview=null" x-show="listingPreview">
+      <h3 class="font-semibold mb-3">📦 eBay listing draft <span class="text-xs text-amber-300" x-text="env.ebay_env"></span></h3>
+      <div class="grid grid-cols-2 gap-3 text-sm" x-show="listingPreview">
+        <label class="col-span-2 block">Title<input x-model="listingPreview.title" maxlength="80" class="mt-1 w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700"></label>
+        <label class="block">Format
+          <select x-model="listingPreview.format" class="mt-1 w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700">
+            <option>AUCTION</option><option>FIXED_PRICE</option>
+          </select>
+        </label>
+        <label class="block">Price ($)<input type="number" step="0.01" x-model.number="listingPreview.price" class="mt-1 w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700"></label>
+        <label class="block">Duration<input x-model="listingPreview.duration" class="mt-1 w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700"></label>
+        <label class="block">Shipping default<input x-model="listingPreview.shipping_default" class="mt-1 w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700"></label>
+        <div class="col-span-2 grid grid-cols-3 gap-2 text-xs text-slate-400">
+          <div>Comp median <span class="text-slate-200 font-mono" x-text="'$'+formatNum(listingPreview.comp_median||0)"></span></div>
+          <div>Est. fees <span class="text-rose-300 font-mono" x-text="'$'+formatNum(listingPreview.expected_fees||0)"></span></div>
+          <div>Net <span class="text-emerald-300 font-mono" x-text="'$'+formatNum(listingPreview.expected_net||0)"></span></div>
+        </div>
+      </div>
+      <div class="flex justify-between mt-4">
+        <button @click="listingPreview=null" class="px-3 py-1.5 rounded bg-slate-800">cancel</button>
+        <div class="flex gap-2">
+          <button @click="publishListing(false)" class="px-3 py-1.5 rounded bg-slate-700 hover:bg-slate-600">save draft</button>
+          <button @click="publishListing(true)" class="px-3 py-1.5 rounded bg-fuchsia-600 hover:bg-fuchsia-500">publish</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- settings modal -->
+  <div x-show="openSettings" x-cloak class="fixed inset-0 bg-slate-950/80 backdrop-blur grid place-items-center z-40 p-6">
+    <div class="bg-slate-900 border border-slate-700 rounded-xl p-5 max-w-md w-full" @click.outside="openSettings=false">
+      <h3 class="font-semibold mb-3">Settings & connections</h3>
+      <div class="space-y-4 text-sm">
+        <div class="border border-slate-800 rounded p-3">
+          <div class="font-medium mb-1">Anthropic API key (Claude vision)</div>
+          <p class="text-xs text-slate-400 mb-2">Anthropic doesn't offer end-user OAuth for third-party apps. Paste your key — stored only in this browser's localStorage; never sent to anyone but api.anthropic.com.</p>
+          <input type="password" x-model="anthropicKey" placeholder="sk-ant-..."
+                 class="w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700 text-xs font-mono">
+          <button @click="saveKey()" class="mt-2 text-xs px-3 py-1 rounded bg-fuchsia-600">save</button>
+          <span class="ml-2 text-xs text-emerald-400" x-show="keySaved">saved ✓</span>
+        </div>
+        <div class="border border-slate-800 rounded p-3">
+          <div class="font-medium mb-1">Google Sheets</div>
+          <p class="text-xs text-slate-400 mb-2">OAuth into your own Google account. Mirrors every save into your CardScanner Inventory spreadsheet.</p>
+          <a href="/api/auth/google/start" target="_blank" class="text-xs px-3 py-1 rounded bg-fuchsia-600 inline-block">Connect Google</a>
+          <span class="ml-2 text-xs" :class="env.google ? 'text-emerald-400':'text-slate-500'" x-text="env.google ? 'connected ✓' : 'not connected'"></span>
+        </div>
+        <div class="border border-slate-800 rounded p-3">
+          <div class="font-medium mb-1">eBay (<span x-text="env.ebay_env || 'sandbox'"></span>)</div>
+          <p class="text-xs text-slate-400 mb-2">Phase 1: sandbox (free, instant). Phase 2: flip EBAY_ENV=production once eBay approves your prod keyset.</p>
+          <a href="/api/auth/ebay/start" target="_blank" class="text-xs px-3 py-1 rounded bg-fuchsia-600 inline-block">Connect eBay</a>
+          <span class="ml-2 text-xs" :class="env.ebay_connected ? 'text-emerald-400':'text-slate-500'" x-text="env.ebay_connected ? 'connected ✓' : (env.ebay_configured ? 'not connected' : 'app keys missing')"></span>
+        </div>
+      </div>
+      <div class="flex justify-end mt-4">
+        <button @click="openSettings=false" class="px-3 py-1.5 rounded bg-slate-800">close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- celebration toast -->
+  <div x-show="toast" x-transition.duration.300ms x-cloak
+       class="fixed bottom-6 right-6 max-w-xs bg-gradient-to-br from-fuchsia-600 to-amber-500 text-white rounded-xl p-4 shadow-2xl z-50">
+    <div class="flex items-start gap-3">
+      <div class="text-3xl" x-text="toast?.icon"></div>
+      <div>
+        <div class="text-xs uppercase tracking-wider opacity-80">Achievement unlocked!</div>
+        <div class="font-bold" x-text="toast?.title"></div>
+        <div class="text-xs opacity-80 mt-0.5" x-text="toast?.description"></div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
