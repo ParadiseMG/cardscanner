@@ -6,6 +6,7 @@ the DB; the front-end polls /scans/jobs/{id}.
 from __future__ import annotations
 
 import asyncio
+import json
 import shutil
 from datetime import datetime, date
 from pathlib import Path
@@ -18,6 +19,10 @@ from app import models, achievements
 from app.config import settings, UPLOAD_DIR
 from app.db import get_engine, session_scope
 from app.services import claude_vision, comp_lookup, hit_watchlist, sheets_sync, xlsx_mirror, drive_inbox
+from app.utils import logger as _log
+from app.utils.images import normalize as normalize_image
+
+log = _log.get(__name__)
 
 
 async def _process_one(
@@ -31,25 +36,59 @@ async def _process_one(
     drive_back_id: Optional[str] = None,
 ) -> dict:
     """Identify + comp-lookup a single image. Persist a Card. Return dict."""
+    started = datetime.utcnow()
+    # Normalize HEIC etc. up-front (also recompute hash post-normalize to keep
+    # idempotency stable across "raw HEIC vs converted JPEG of same image").
+    image_path = normalize_image(image_path)
+    if back_path:
+        back_path = normalize_image(back_path)
+
+    # Idempotency check (only when we know the hash already)
+    if front_hash:
+        with session_scope() as s:
+            from sqlmodel import select as _select
+            existing = s.exec(_select(models.Card).where(
+                (models.Card.front_hash == front_hash) | (models.Card.back_hash == front_hash)
+            )).first()
+            if existing:
+                log.info("dedupe skip", extra={"hash": front_hash[:12], "card_id": existing.id})
+                return {"ok": True, "skipped": True, "card_id": existing.id}
+
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
-            ident = await claude_vision.identify_card_async(
-                str(image_path),
-                back_path=str(back_path) if back_path else None,
-                api_key_override=api_key_override, client=client,
+            with _log.step(log, "claude_identify", front=image_path.name):
+                ident = await claude_vision.identify_card_async(
+                    str(image_path),
+                    back_path=str(back_path) if back_path else None,
+                    api_key_override=api_key_override, client=client,
+                )
+        with _log.step(log, "comp_lookup", player=ident.player, year=ident.year):
+            comp = await comp_lookup.fetch_comps(
+                ident.year, ident.set_brand, ident.player, ident.card_no, ident.parallel,
             )
-        comp = await comp_lookup.fetch_comps(
-            ident.year, ident.set_brand, ident.player, ident.card_no, ident.parallel,
-        )
 
         with session_scope() as s:
+            # A4: build notes, incorporating low-confidence flag if needed
+            card_notes = ident.notes
+            review_flagged = ident.review_flagged
+            if ident.low_confidence_fields:
+                flag_note = f"Auto-flagged: low confidence on {ident.low_confidence_fields}"
+                card_notes = f"{card_notes}\n{flag_note}" if card_notes else flag_note
+                review_flagged = True
+            # B3: append bulk-lot warning to notes
+            if comp.suspicious_bulk:
+                bulk_note = "⚠️ Comp prices look like a bulk-lot fingerprint — verify before pricing"
+                card_notes = f"{card_notes}\n{bulk_note}" if card_notes else bulk_note
+            # B3: effective value prefers recency-weighted median
+            effective_value = comp.median_recency_weighted or comp.median
+
             card = models.Card(
                 year=ident.year, set_brand=ident.set_brand, player=ident.player,
                 card_no=ident.card_no, parallel=ident.parallel or "Base",
                 team=ident.team, condition=ident.condition,
                 is_graded=ident.is_graded, grade=ident.grade,
                 is_autograph=ident.is_autograph, is_relic=ident.is_relic,
-                review_flagged=ident.review_flagged,
+                review_flagged=review_flagged,
                 front_image=image_path.name,
                 back_image=back_path.name if back_path else None,
                 front_hash=front_hash, back_hash=back_hash,
@@ -57,9 +96,27 @@ async def _process_one(
                 comp_median=comp.median, comp_low=comp.low, comp_high=comp.high,
                 comp_count=comp.count, comp_url=comp.url,
                 comp_fetched_at=datetime.utcnow(),
-                est_value_raw=comp.median,
-                notes=ident.notes,
-                consider_grading=(comp.median or 0) >= 30 and not ident.is_graded,
+                est_value_raw=effective_value,
+                notes=card_notes,
+                consider_grading=(effective_value or 0) >= 30 and not ident.is_graded,
+                # A4: vision intelligence fields
+                is_rookie=ident.is_rookie,
+                is_serial_numbered=ident.is_serial_numbered,
+                serial_print_run=ident.serial_print_run,
+                photo_quality=ident.photo_quality,
+                low_confidence_fields=(
+                    json.dumps(ident.low_confidence_fields)
+                    if ident.low_confidence_fields else None
+                ),
+                condition_signals=(
+                    json.dumps(ident.condition_signals)
+                    if ident.condition_signals else None
+                ),
+                # B3: comp intelligence fields
+                comp_confidence=comp.confidence,
+                comp_median_weighted=comp.median_recency_weighted,
+                comp_suspicious_bulk=comp.suspicious_bulk,
+                comp_suspicious_reason=comp.suspicious_reason or None,
             )
             is_hit, reason = hit_watchlist.match(card, s)
             card.is_hit_watchlist = is_hit
@@ -74,7 +131,7 @@ async def _process_one(
                 "ok": True,
                 "card_id": card.id,
                 "title": card.display_title(),
-                "value": card.comp_median or 0,
+                "value": card.comp_median_weighted or card.comp_median or 0,
                 "hit": card.is_hit_watchlist,
                 "unlocks": [u.code for u in new_unlocks],
             }
@@ -88,8 +145,16 @@ async def _process_one(
             except Exception:
                 pass
 
+        log.info("card processed", extra={
+            "card_id": snapshot["card_id"], "value": snapshot["value"],
+            "hit": snapshot["hit"], "duration_ms": int((datetime.utcnow()-started).total_seconds()*1000),
+        })
         return snapshot
     except Exception as e:
+        log.exception("card process fail", extra={
+            "image": image_path.name, "error": str(e),
+            "duration_ms": int((datetime.utcnow()-started).total_seconds()*1000),
+        })
         return {"ok": False, "error": str(e), "image": str(image_path.name)}
 
 

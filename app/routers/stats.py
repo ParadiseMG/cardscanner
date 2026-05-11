@@ -1,7 +1,10 @@
 """Stats / achievements / action queue endpoints."""
 from __future__ import annotations
 
+from datetime import datetime, timedelta
+
 from fastapi import APIRouter
+from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from app import models, achievements
@@ -82,6 +85,42 @@ def insights() -> dict:
         return {"items": items}
 
 
+# ---------------------------------------------------------------------------
+# B8: GET /api/stats/last_24h
+# ---------------------------------------------------------------------------
+
+class Last24hResponse(BaseModel):
+    scanned: int
+    hits: int
+    value_added: float
+    ids: list[int]
+
+
+@router.get("/stats/last_24h", response_model=Last24hResponse)
+def last_24h() -> Last24hResponse:
+    """Cards added in the last 24 hours with value summary."""
+    cutoff = datetime.utcnow() - timedelta(hours=24)
+    with Session(get_engine()) as s:
+        cards = s.exec(
+            select(models.Card).where(models.Card.created_at >= cutoff)
+        ).all()
+
+    def _effective(c: models.Card) -> float:
+        return c.comp_median_weighted or c.comp_median or c.est_value_raw or 0.0
+
+    # Sort by id ascending so ids list is deterministic
+    cards_sorted = sorted(cards, key=lambda c: c.id)
+    hits = [c for c in cards_sorted if c.is_hit_watchlist]
+    value_added = sum(_effective(c) for c in cards_sorted)
+
+    return Last24hResponse(
+        scanned=len(cards_sorted),
+        hits=len(hits),
+        value_added=round(value_added, 2),
+        ids=[c.id for c in cards_sorted],
+    )
+
+
 @router.get("/action-queue")
 def action_queue() -> dict:
     with Session(get_engine()) as s:
@@ -89,11 +128,22 @@ def action_queue() -> dict:
         grade  = s.exec(select(models.Card).where(models.Card.consider_grading == True,
                                                   models.Card.is_graded == False)).all()
         photo  = s.exec(select(models.Card).where(models.Card.needs_photo_verification == True)).all()
+        # B5: low comp confidence bucket — only cards worth manually re-checking (value ≥ $5)
+        low_conf_raw = s.exec(
+            select(models.Card).where(models.Card.comp_confidence == "low")
+        ).all()
+
+        def _effective(c: models.Card) -> float:
+            return c.comp_median_weighted or c.comp_median or c.est_value_raw or 0.0
+
+        low_conf = [c for c in low_conf_raw if _effective(c) >= 5.0]
+
         def m(c: models.Card) -> dict:
             return {"id": c.id, "title": c.display_title(),
-                    "value": c.comp_median or c.est_value_raw or 0}
+                    "value": _effective(c)}
         return {
             "needs_review": [m(c) for c in review],
             "consider_grading": [m(c) for c in grade],
             "needs_photo_verification": [m(c) for c in photo],
+            "low_comp_confidence": [m(c) for c in low_conf],
         }

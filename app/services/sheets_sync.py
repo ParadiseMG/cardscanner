@@ -114,7 +114,7 @@ def append_card(card: models.Card) -> bool:
     row = [
         card.year, card.set_brand, card.player, card.card_no, card.parallel,
         card.condition,
-        card.est_value_raw or "", card.comp_median or "",
+        card.est_value_raw or "", card.comp_median_weighted or card.comp_median or "",
         card.comp_low or "", card.comp_high or "", card.comp_url or "",
         card.status, card.channel or "",
         card.ebay_status, card.ebay_listing_id or "",
@@ -136,3 +136,84 @@ def append_card(card: models.Card) -> bool:
 
 def is_connected() -> bool:
     return Path(settings.google_token_path).exists()
+
+
+# ---------------------------------------------------------------------------
+# A4: Sales sheet mirror
+# ---------------------------------------------------------------------------
+
+SALES_SHEET_HEADER = [
+    "Sold At", "Player", "Year", "Set/Brand", "Card #", "Parallel",
+    "Channel", "Sold Price", "Fees", "Net", "Acquisition Cost", "Profit",
+    "eBay Offer ID", "Notes",
+]
+
+
+def _ensure_sales_sheet(svc, sid: str) -> None:
+    """Create a 'Sales' tab in the spreadsheet if it doesn't exist."""
+    meta = svc.spreadsheets().get(spreadsheetId=sid).execute()
+    existing = [s["properties"]["title"] for s in meta.get("sheets", [])]
+    if "Sales" in existing:
+        return
+    # Add the sheet
+    svc.spreadsheets().batchUpdate(
+        spreadsheetId=sid,
+        body={"requests": [{"addSheet": {"properties": {"title": "Sales"}}}]},
+    ).execute()
+    # Write header row
+    svc.spreadsheets().values().update(
+        spreadsheetId=sid, range="Sales!A1",
+        valueInputOption="RAW", body={"values": [SALES_SHEET_HEADER]},
+    ).execute()
+
+
+def append_sale(card: models.Card) -> bool:
+    """Append a sold-card row to the 'Sales' tab of the Google Sheet mirror.
+
+    Creates the 'Sales' tab if it doesn't exist.  Silently returns False if
+    Google Sheets is not connected or the write fails.
+    """
+    try:
+        svc = _service()
+        sid = ensure_sheet()
+    except Exception:
+        return False
+
+    try:
+        _ensure_sales_sheet(svc, sid)
+    except Exception:
+        return False
+
+    sold_at_str = card.sold_at.isoformat() if card.sold_at else ""
+    gross = card.sold_price or 0.0
+    fees = round(gross * (card.fee_pct or 0.13), 2)
+    net = round(gross - fees, 2)
+    acq = card.acquisition_cost or ""
+    profit = round(net - float(acq), 2) if acq else ""
+
+    row = [
+        sold_at_str,
+        card.player or "",
+        card.year or "",
+        card.set_brand or "",
+        card.card_no or "",
+        card.parallel or "",
+        card.sale_channel or card.channel or "eBay",
+        gross,
+        fees,
+        net,
+        acq,
+        profit,
+        card.ebay_offer_id or "",
+        card.notes or "",
+    ]
+    try:
+        svc.spreadsheets().values().append(
+            spreadsheetId=sid, range="Sales!A1",
+            valueInputOption="USER_ENTERED",
+            insertDataOption="INSERT_ROWS",
+            body={"values": [row]},
+        ).execute()
+        return True
+    except HttpError:
+        return False

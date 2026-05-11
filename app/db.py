@@ -16,6 +16,8 @@ _engine = create_engine(
 
 def init_db() -> None:
     SQLModel.metadata.create_all(_engine)
+    from app import migrations
+    migrations.run(_engine)
     _seed_hit_watchlist()
 
 

@@ -132,6 +132,9 @@ class SaleRequest(BaseModel):
 
 
 @router.post("/listings/{listing_id}/mark-sold")
+# DEPRECATED (Round 4): prefer POST /api/sales/{listing_id}/mark-sold-manual
+# which also supports sale_channel, sold_at, and fires the xlsx/Sheets mirrors.
+# This route is kept for backward compatibility.
 def mark_sold(listing_id: int, req: SaleRequest) -> dict:
     with Session(get_engine()) as s:
         L = s.get(models.Listing, listing_id)

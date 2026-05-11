@@ -116,14 +116,63 @@ If you don't set `GOOGLE_SHEET_ID`, the app will create a "CardScanner Inventory
 
 ## Daily workflow
 
-1. Take photos of cards on your phone (the eBay/iOS Camera app's "Document" mode crops nicely).
+1. Take photos of cards on your phone (the eBay/iOS Camera app's "Document" mode crops nicely). HEIC photos work natively — no conversion needed.
 2. Drag the photos into your Drive `Baseball Cards/To Be Processed/` folder.
    - **Single-sided cards**: any filename, e.g. `IMG_4421.jpg`.
    - **Two-sided cards**: name them `whatever_front.jpg` and `whatever_back.jpg`. The matcher pairs by base name.
-3. In the dashboard, click **Sync new cards →** (or enable auto-sync — checks every 5 min).
-4. Watch the progress bar; cards start landing in **Recent scans** with their identification, comp price, and Hit Watchlist status.
+3. In the dashboard, click **Sync new cards →** (or enable auto-sync — checks every 5 min). Activity stripe above the inventory table shows progress in real time.
+4. Cards start landing in **Recent scans** with their identification, comp price, and Hit Watchlist status. Hit cards confetti.
 5. Click any card to edit — Claude isn't always right about parallels.
 6. Click the **eBay** button on any row to preview an auto-built listing (title, format, price, item-specifics, fee math), edit, and publish.
+
+### Inventory keyboard shortcuts
+
+| Key | Action |
+|-----|--------|
+| `j` / `k` | Move row focus down / up |
+| `x` | Toggle selection on focused row |
+| `e` | Open edit modal for focused row |
+| `l` | Open eBay listing preview |
+| `/` | Focus the search box |
+| `g h` | Jump to top of inventory |
+| `?` | Show shortcuts overlay |
+| `Escape` | Close modal / clear focus |
+
+(Shortcuts only fire when you're not typing in an input. First inventory visit shows a hint.)
+
+### Bulk operations
+
+Select cards via checkbox or use **Select all matching filter (N)** for everything that matches your current filter chips. The bulk toolbar appears with: change Status, change Channel, add Note, Recompute comps (re-fetches eBay sold prices), Move to bulk lot, Delete (soft — recoverable until you purge `status="Deleted"`).
+
+### What the AI is doing for you now
+
+CardScanner doesn't just identify cards — it tells you what to *do*. The **Suggestions tab** is the new front-and-center "what should I do next?" surface, with five kinds of action items:
+
+- **Grade** — raw cards worth ≥ $80. Grading runs $25-50 and a PSA 9 often multiplies the price 2-3×.
+- **List Now** — Hit Watchlist matches you haven't put on eBay yet. List them before they cool off.
+- **Verify Comps** — when 5+ recent sales are at the same price, that's usually a bulk-lot fingerprint, not a real comp. Worth a manual check before you list.
+- **Reshoot** — Claude flagged the photo as blurry, obstructed, or off-angle. A better photo improves both ID and listing quality.
+- **Bulk Lot** — sub-dollar singles ready to be bundled.
+
+Each row in the inventory now also shows a comp-confidence dot:
+
+- 🟢 **High** — ≥10 sold comps with low spread
+- 🟡 **Medium** — 5-9 comps
+- 🔴 **Low** — fewer than 5 comps, or wide spread, or suspicious-bulk pattern
+
+Plus per-card chips: **RC** (rookie), **/N** (serial-numbered with print run), **⚠** (low-confidence vision call or suspicious comps).
+
+When Claude is uncertain about a parallel or card number, the system automatically re-asks Claude with a tighter, focused prompt. Cards still flagged after the retry land in the Action Queue's "Needs review" bucket.
+
+### Selling and grading
+
+The **Money tab** closes the loop on sales. Once an eBay listing sells, click **Sync eBay sales** and the dashboard pulls the active → sold transitions, stamps each Card with `sold_price`, `sold_at`, and channel, and updates the monthly P&L chart. Sales that didn't go through eBay (LCS, Facebook, in-person) get logged via the **Manual sale** button.
+
+The Sales Log tab in your existing `Baseball_Cards.xlsx` mirrors automatically — the dashboard increments the matching month's roll-up row instead of appending duplicates, so the formula structure (TOTAL row, NET column) stays intact. A "Sales" sheet in your CardScanner Inventory Google Sheet is created and updated in parallel.
+
+**Grading submissions:** click **Grade** on any Suggestions item (raw cards ≥ $80) to add it to a queue. When you've batched up enough cards, hit **Send batch** to choose service (PSA / SGC) and level (Value / Regular / Express) — the dashboard downloads a properly-formatted CSV ready for the PSA submission tool, and marks every queued card with a tracking ID and `status="Pending Grading"`. When grades come back, use **Mark batch back** on the Money tab to set each card's grade and re-comp at graded prices.
+
+**Bulk lots:** the dashboard auto-clusters sub-dollar cards into proposed lots by year + set (e.g. *"1989 Donruss baseball commons — lot of 36"*), with a suggested title and price (sum of comps × 0.7). The "Bulk lot proposals" section on the Money tab shows them ranked by estimated value; **Build lot** creates the lot, **Build + list on eBay** drafts the listing in one click.
 
 ## Tests
 

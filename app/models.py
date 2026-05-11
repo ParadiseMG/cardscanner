@@ -58,10 +58,34 @@ class Card(SQLModel, table=True):
     consider_grading: bool = False
     review_flagged: bool = False  # Claude was unsure
 
+    # A3: vision intelligence fields (Round 3)
+    is_rookie: bool = False
+    is_serial_numbered: bool = False
+    serial_print_run: Optional[int] = None
+    photo_quality: Optional[str] = None
+    low_confidence_fields: Optional[str] = None  # JSON-encoded list
+    condition_signals: Optional[str] = None      # JSON-encoded dict
+
+    # B2: comp intelligence fields (Round 3)
+    comp_confidence: Optional[str] = None         # high / medium / low
+    comp_median_weighted: Optional[float] = None
+    comp_suspicious_bulk: bool = False
+    comp_suspicious_reason: Optional[str] = None
+
+    # B6: Grading submission + bulk-lot fields (Round 4)
+    grading_submission_id: Optional[str] = None  # uuid linking cards in a submission
+    user_overrides: Optional[str] = None          # JSON-encoded list of user-edited fields
+    lot_id: Optional[int] = None                  # FK to BulkLot (not enforced in SQLite)
+
     # Sale outcome
     sold_price: Optional[float] = None
     sold_date: Optional[date] = None
     fee_pct: Optional[float] = None  # 0.13 default for eBay
+
+    # A3: Sales tracking fields (Round 4)
+    sold_at: Optional[datetime] = None          # exact sale datetime (vs sold_date which is date-only)
+    sale_channel: Optional[str] = None          # "eBay" / "FB" / "LCS" / etc.
+    acquisition_cost: Optional[float] = None    # what Connor paid for this card
 
     # Image filenames (under data/uploads/)
     front_image: Optional[str] = None
@@ -118,13 +142,15 @@ class Card(SQLModel, table=True):
 class ScanJob(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     label: Optional[str] = None
-    status: str = "queued"  # queued / processing / done / error
+    status: str = "queued"  # queued / processing / done / error / abandoned
     total: int = 0
     processed: int = 0
     failed: int = 0
     started_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
+    # A4: JSON list of source image paths/IDs for batch-resume
+    source_manifest: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -178,8 +204,26 @@ class Listing(SQLModel, table=True):
     sold_at: Optional[datetime] = None
     fees: Optional[float] = None
 
+    # A3: Sales sync tracking fields (Round 4)
+    last_synced_at: Optional[datetime] = None   # when sales_sync last touched this row
+    sync_error: Optional[str] = None            # last sync error message if any
+
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+# ---------------------------------------------------------------------------
+# BulkLot — a proposed or created bulk-lot listing.
+# ---------------------------------------------------------------------------
+class BulkLot(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    label: str
+    listing_title: Optional[str] = None
+    price: Optional[float] = None
+    status: str = "draft"            # draft / listed / sold
+    ebay_listing_id: Optional[str] = None
+    sold_price: Optional[float] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
 # ---------------------------------------------------------------------------

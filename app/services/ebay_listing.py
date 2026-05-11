@@ -38,8 +38,11 @@ from typing import Optional
 
 import httpx
 
-from app.config import settings
+from app.config import settings, UPLOAD_DIR
 from app import models
+from app.utils import logger as _log
+
+log = _log.get(__name__)
 
 
 SCOPES = [
@@ -311,6 +314,75 @@ def _build_description(card: models.Card) -> str:
 # ---------------------------------------------------------------------------
 # Publish via Sell API (Phase 1 stops at createOffer in sandbox)
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# eBay Picture Services (EPS) upload
+# ---------------------------------------------------------------------------
+async def upload_image_to_eps(image_bytes: bytes, *, filename: str = "card.jpg") -> Optional[str]:
+    """POST a JPEG to eBay's Media API; return the hosted image URL.
+
+    Sandbox often returns errors here for non-allowlisted media — that's fine,
+    we fall back to a placeholder. The wiring is here so production is one
+    config flip away.
+    """
+    try:
+        token = await _access_token()
+    except Exception:
+        return None
+    base = settings.ebay_api_base
+    url = f"{base}/commerce/media/v1_beta/image"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+    }
+    files = {"image": (filename, image_bytes, "image/jpeg")}
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            r = await client.post(url, headers=headers, files=files)
+            if r.status_code >= 400:
+                log.warning("eps upload failed",
+                            extra={"status": r.status_code, "body": r.text[:200]})
+                return None
+            return r.json().get("imageUrl") or r.json().get("image", {}).get("imageUrl")
+    except httpx.HTTPError as e:
+        log.warning("eps upload network error", extra={"error": type(e).__name__})
+        return None
+
+
+async def get_image_urls_for_card(card: models.Card) -> list[str]:
+    """Return URLs eBay can fetch for this card.
+
+    Strategy:
+    1. If we have local upload_dir copies, upload to EPS and use those URLs.
+    2. If we have Drive file IDs, make them public and use the direct-content URL.
+    3. Else, fall back to an eBay-hosted placeholder so the listing still drafts.
+    """
+    urls: list[str] = []
+    candidate_files = [card.front_image, card.back_image]
+    for fname in [f for f in candidate_files if f]:
+        local = UPLOAD_DIR / fname
+        if local.exists():
+            try:
+                eps_url = await upload_image_to_eps(local.read_bytes(), filename=fname)
+                if eps_url:
+                    urls.append(eps_url)
+                    continue
+            except Exception:
+                pass
+        # else: fall through
+
+    if not urls and (card.drive_front_id or card.drive_back_id):
+        try:
+            from app.services import drive_inbox
+            for fid in filter(None, [card.drive_front_id, card.drive_back_id]):
+                urls.append(drive_inbox.make_public(fid))
+        except Exception as e:
+            log.warning("drive-public fallback failed", extra={"error": str(e)})
+
+    if not urls:
+        urls.append("https://i.ebayimg.com/images/g/placeholder/s-l1600.jpg")
+    return urls
+
+
 @dataclass
 class PublishResult:
     success: bool
@@ -342,14 +414,13 @@ async def publish_listing(card: models.Card, draft: dict, publish: bool = False)
     }
     aspects = {k: v for k, v in draft["aspects"].items() if v}
 
+    image_urls = await get_image_urls_for_card(card)
     inventory_body = {
         "product": {
             "title": draft["title"],
             "description": draft["description"],
             "aspects": aspects,
-            # placeholder image URL list -- in production we POST images to EPS
-            # and use the returned hosted URLs. Sandbox accepts any URL.
-            "imageUrls": ["https://i.ebayimg.com/images/g/placeholder/s-l1600.jpg"],
+            "imageUrls": image_urls,
         },
         "condition": draft["condition"],
         "availability": {"shipToLocationAvailability": {"quantity": 1}},

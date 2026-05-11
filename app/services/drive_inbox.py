@@ -38,6 +38,33 @@ from sqlmodel import Session, select
 from app.config import settings, UPLOAD_DIR
 from app import models
 from app.db import session_scope
+from app.utils import logger as _log
+
+log = _log.get(__name__)
+
+
+def _retry(call, *, attempts: int = 4, base_delay: float = 1.0):
+    """Sync retry for googleapiclient calls (handles 429/5xx via HttpError)."""
+    import time, random
+    from googleapiclient.errors import HttpError
+    last: Exception | None = None
+    for n in range(1, attempts + 1):
+        try:
+            return call()
+        except HttpError as e:
+            sc = getattr(e, "status_code", None) or e.resp.status
+            if sc not in (429, 500, 502, 503, 504) or n == attempts:
+                raise
+            last = e
+        except Exception as e:
+            if n == attempts:
+                raise
+            last = e
+        delay = min(8.0, base_delay * (2 ** (n - 1)))
+        delay *= 0.7 + 0.6 * random.random()
+        log.warning("drive retry", extra={"attempt": n, "error": type(last).__name__})
+        time.sleep(delay)
+    raise last  # pragma: no cover
 
 
 # ---------------------------------------------------------------------------
@@ -114,35 +141,39 @@ PAIR_RE = re.compile(r"^(?P<base>.+?)_(?P<side>front|back)\.(?P<ext>[A-Za-z0-9]+
 
 def list_inbox(folders: InboxFolders) -> list[dict]:
     svc = _service()
-    res = svc.files().list(
+    res = _retry(lambda: svc.files().list(
         q=f"'{folders.inbox_id}' in parents and trashed = false",
         fields="files(id, name, mimeType, md5Checksum, size)",
         orderBy="createdTime",
         pageSize=200,
-    ).execute()
+    ).execute())
     return [f for f in res.get("files", []) if f.get("mimeType") in IMAGE_MIMES]
 
 
 def download_to(path: Path, file_id: str) -> Path:
     svc = _service()
-    request = svc.files().get_media(fileId=file_id)
-    buf = io.BytesIO()
-    dl = MediaIoBaseDownload(buf, request)
-    done = False
-    while not done:
-        _, done = dl.next_chunk()
-    path.write_bytes(buf.getvalue())
-    return path
+    def _do():
+        request = svc.files().get_media(fileId=file_id)
+        buf = io.BytesIO()
+        dl = MediaIoBaseDownload(buf, request)
+        done = False
+        while not done:
+            _, done = dl.next_chunk()
+        path.write_bytes(buf.getvalue())
+        return path
+    return _retry(_do)
 
 
 def move_file(file_id: str, dest_folder_id: str) -> None:
     svc = _service()
-    f = svc.files().get(fileId=file_id, fields="parents").execute()
-    prev = ",".join(f.get("parents", []))
-    svc.files().update(
-        fileId=file_id, addParents=dest_folder_id, removeParents=prev,
-        fields="id, parents",
-    ).execute()
+    def _do():
+        f = svc.files().get(fileId=file_id, fields="parents").execute()
+        prev = ",".join(f.get("parents", []))
+        svc.files().update(
+            fileId=file_id, addParents=dest_folder_id, removeParents=prev,
+            fields="id, parents",
+        ).execute()
+    _retry(_do)
 
 
 def make_public(file_id: str) -> str:

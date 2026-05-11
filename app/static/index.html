@@ -25,21 +25,66 @@
     </div>
     <div class="flex items-center gap-3 text-sm">
       <span class="px-2 py-1 rounded bg-slate-800" x-text="'Streak: '+(stats.streak_days||0)+'d 🔥'"></span>
-      <button @click="openSettings=true" class="px-3 py-1.5 rounded bg-slate-800 hover:bg-slate-700">⚙︎ Settings</button>
+      <button @click="openSettings=true" class="px-3 py-1.5 rounded bg-slate-800 hover:bg-slate-700 focus:outline-none focus:ring-2 focus:ring-fuchsia-500">⚙︎ Settings</button>
     </div>
   </header>
 
   <!-- tabs -->
-  <nav class="flex gap-1 mb-4 border-b border-slate-800">
-    <template x-for="t in ['Dashboard','Inventory','Listings','Achievements']" :key="t">
-      <button @click="tab=t"
+  <nav class="flex gap-1 mb-0 border-b border-slate-800">
+    <template x-for="t in ['Dashboard','Inventory','Suggestions','Listings','Money','Achievements']" :key="t">
+      <button @click="tab=t; if(t==='Inventory') onInventoryTabEnter(); if(t==='Suggestions') loadSuggestions(); if(t==='Money') onMoneyTabEnter()"
               :class="tab===t ? 'text-fuchsia-300 border-b-2 border-fuchsia-400' : 'text-slate-400 hover:text-slate-200'"
-              class="px-4 py-2 text-sm font-medium" x-text="t"></button>
+              class="px-4 py-2 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-fuchsia-500 focus:ring-inset">
+        <span x-text="t"></span>
+        <template x-if="t==='Suggestions' && suggestionsCount() > 0">
+          <span class="ml-1 px-1.5 py-0.5 rounded bg-fuchsia-600/40 text-fuchsia-200 text-[10px]"
+                x-text="suggestionsCount()"></span>
+        </template>
+      </button>
     </template>
   </nav>
 
+  <!-- ============================================================ B5: ACTIVITY STRIPE -->
+  <!-- Persistent stripe between tabs and content — always visible -->
+  <div class="relative border-b border-slate-800 overflow-hidden" style="min-height:36px">
+    <!-- Job progress bar (layered behind stripe text) -->
+    <template x-if="job && job.status !== 'done'">
+      <div class="absolute inset-0 h-full bg-gradient-to-r from-fuchsia-900/60 to-amber-900/40 transition-all"
+           :style="'width:'+jobProgressPct()+'%'"></div>
+    </template>
+
+    <div class="relative flex items-center justify-between px-3 py-2 text-xs">
+      <!-- Left: stats or job progress text -->
+      <div class="flex items-center gap-3 text-slate-400">
+        <template x-if="job && job.status !== 'done'">
+          <span class="text-fuchsia-300 font-medium">
+            Processing: <span x-text="job.processed"></span> / <span x-text="job.total"></span> cards
+            (<span x-text="jobProgressPct()"></span>%)
+          </span>
+        </template>
+        <template x-if="!job || job.status === 'done'">
+          <span x-text="stripeText()"></span>
+        </template>
+        <!-- View new cards link after job done -->
+        <template x-if="job && job.status === 'done' && stripe.newCardIds.length">
+          <button @click="tab='Inventory'; filterToday()"
+                  class="text-fuchsia-300 hover:text-fuchsia-200 underline focus:outline-none focus:ring-1 focus:ring-fuchsia-500">
+            View <span x-text="stripe.newCardIds.length"></span> new cards
+          </button>
+        </template>
+      </div>
+      <!-- Right: filter-to-today chip -->
+      <button x-show="stripe.scanned24h > 0 && (!job || job.status === 'done')"
+              @click="filterToday()"
+              :class="stripeFilterActive ? 'bg-fuchsia-600/40 text-fuchsia-200' : 'bg-slate-800 text-slate-400 hover:text-slate-200'"
+              class="px-2 py-0.5 rounded text-xs focus:outline-none focus:ring-1 focus:ring-fuchsia-500">
+        <span x-text="stripeFilterActive ? 'Clear today filter' : 'Show today'"></span>
+      </button>
+    </div>
+  </div>
+
   <!-- ============================================================ DASHBOARD -->
-  <section x-show="tab==='Dashboard'" x-transition>
+  <section x-show="tab==='Dashboard'" x-transition class="mt-4">
 
     <!-- stat cards -->
     <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
@@ -83,7 +128,7 @@
         </div>
         <div class="flex flex-col items-end gap-2">
           <button @click="syncDrive()" :disabled="!drive.connected || job"
-                  class="px-5 py-2.5 rounded-lg bg-fuchsia-600 hover:bg-fuchsia-500 disabled:opacity-50 disabled:cursor-not-allowed font-medium">
+                  class="px-5 py-2.5 rounded-lg bg-fuchsia-600 hover:bg-fuchsia-500 disabled:opacity-50 disabled:cursor-not-allowed font-medium focus:outline-none focus:ring-2 focus:ring-fuchsia-400">
             Sync new cards →
           </button>
           <label class="flex items-center gap-2 text-xs text-slate-400">
@@ -97,23 +142,22 @@
     <details class="rounded-xl bg-slate-900/50 border border-slate-800 p-4 mb-6">
       <summary class="cursor-pointer text-sm text-slate-400 hover:text-slate-200">📎 Or upload files directly (fallback)</summary>
       <div class="mt-4 rounded-2xl border-2 border-dashed border-slate-700 hover:border-fuchsia-500 transition-all p-6"
-         @dragover.prevent="dragOver=true" @dragleave.prevent="dragOver=false"
-         @drop.prevent="onDrop($event)" :class="dragOver ? 'border-fuchsia-400 bg-slate-900' : ''">
-      <div class="text-center">
-        <div class="text-3xl mb-2">🎴</div>
-        <p class="text-sm text-slate-400">Drag & drop, or:</p>
-        <div class="mt-3">
-          <label class="inline-block px-4 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 cursor-pointer text-sm">
-            Choose files
-            <input type="file" multiple accept="image/*" class="hidden" @change="onFiles($event.target.files)">
-          </label>
+           @dragover.prevent="dragOver=true" @dragleave.prevent="dragOver=false"
+           @drop.prevent="onDrop($event)" :class="dragOver ? 'border-fuchsia-400 bg-slate-900' : ''">
+        <div class="text-center">
+          <div class="text-3xl mb-2">🎴</div>
+          <p class="text-sm text-slate-400">Drag & drop, or:</p>
+          <div class="mt-3">
+            <label class="inline-block px-4 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 cursor-pointer text-sm">
+              Choose files
+              <input type="file" multiple accept="image/*" class="hidden" @change="onFiles($event.target.files)">
+            </label>
+          </div>
         </div>
-      </div>
-
       </div>
     </details>
 
-    <!-- progress (shared) -->
+    <!-- progress (Dashboard tab — kept for backwards compat) -->
     <template x-if="job">
       <div class="mb-6 rounded-xl bg-slate-900 border border-fuchsia-500/40 p-4 max-w-2xl mx-auto">
         <div class="flex justify-between text-xs text-slate-400 mb-1">
@@ -152,8 +196,18 @@
           <li class="flex justify-between"><span>Needs review</span><span class="font-mono text-amber-300" x-text="actionQ.needs_review?.length || 0"></span></li>
           <li class="flex justify-between"><span>Consider grading</span><span class="font-mono text-emerald-300" x-text="actionQ.consider_grading?.length || 0"></span></li>
           <li class="flex justify-between"><span>Photo verification</span><span class="font-mono text-fuchsia-300" x-text="actionQ.needs_photo_verification?.length || 0"></span></li>
+          <li class="flex justify-between">
+            <button @click="filterLowCompConfidence()"
+                    class="text-left hover:text-slate-200 focus:outline-none focus:ring-1 focus:ring-fuchsia-500 rounded">
+              Low comp confidence
+            </button>
+            <span class="font-mono text-rose-300" x-text="actionQ.low_comp_confidence?.length || 0"></span>
+          </li>
         </ul>
-        <button @click="tab='Inventory'; filterReview=true" class="mt-3 w-full text-xs px-3 py-2 rounded bg-slate-800 hover:bg-slate-700">Open in inventory →</button>
+        <button @click="tab='Inventory'; filterReview=true; onInventoryTabEnter(); applyFilters()"
+                class="mt-3 w-full text-xs px-3 py-2 rounded bg-slate-800 hover:bg-slate-700 focus:outline-none focus:ring-1 focus:ring-fuchsia-500">
+          Open in inventory →
+        </button>
       </div>
     </div>
 
@@ -173,12 +227,16 @@
     <div class="rounded-xl bg-slate-900 border border-slate-800 p-4">
       <div class="flex justify-between items-center mb-3">
         <h3 class="font-semibold">Recent scans</h3>
-        <button @click="loadRecent()" class="text-xs text-slate-400 hover:text-slate-200">refresh</button>
+        <button @click="loadRecent()" class="text-xs text-slate-400 hover:text-slate-200 focus:outline-none focus:ring-1 focus:ring-fuchsia-500">refresh</button>
       </div>
       <div class="grid grid-cols-2 md:grid-cols-5 gap-3">
         <template x-for="c in recent" :key="c.id">
-          <div class="rounded-lg bg-slate-800 border border-slate-700 p-3 hover:border-fuchsia-500 cursor-pointer"
-               @click="openCard(c)">
+          <div class="rounded-lg bg-slate-800 border border-slate-700 p-3 hover:border-fuchsia-500 cursor-pointer focus:outline-none focus:ring-2 focus:ring-fuchsia-500"
+               tabindex="0" @click="openCard(c)" @keydown.enter="openCard(c)">
+            <!-- B6: lazy image loading -->
+            <template x-if="c.front_image">
+              <img :src="'/uploads/'+c.front_image" loading="lazy" class="w-full h-20 object-cover rounded mb-2" alt="">
+            </template>
             <div class="text-xs text-slate-400 truncate" x-text="c.title"></div>
             <div class="text-lg font-bold mt-1" x-text="'$'+formatNum(c.comp_median||c.est_value_raw||0)"></div>
             <div class="text-xs mt-1">
@@ -197,69 +255,514 @@
   </section>
 
   <!-- ============================================================ INVENTORY -->
-  <section x-show="tab==='Inventory'" x-transition>
-    <div class="flex items-center gap-3 mb-4">
-      <input x-model="search" @input.debounce.300="loadInventory()" placeholder="Search player or set..."
-             class="flex-1 px-3 py-2 rounded bg-slate-900 border border-slate-800 text-sm">
-      <label class="text-sm flex items-center gap-2">
-        <input type="checkbox" x-model="filterHits" @change="loadInventory()"> Hits only
-      </label>
-      <label class="text-sm flex items-center gap-2">
-        <input type="checkbox" x-model="filterReview" @change="loadInventory()"> Needs review
-      </label>
+  <section x-show="tab==='Inventory'" x-transition class="mt-4">
+
+    <!-- B4: keyboard hint chip (first visit) -->
+    <div x-show="showKeyboardHint" x-transition.duration.300ms
+         class="mb-3 inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-slate-800 border border-slate-700 text-xs text-slate-400">
+      <span>⌨</span> Press <kbd class="px-1.5 py-0.5 rounded bg-slate-700 font-mono text-slate-300">?</kbd> for keyboard shortcuts
     </div>
-    <div class="rounded-xl bg-slate-900 border border-slate-800 overflow-hidden">
-      <table class="w-full text-sm">
-        <thead class="bg-slate-800 text-slate-300">
-          <tr>
-            <th class="text-left px-3 py-2"><input type="checkbox" @change="toggleAll($event)"></th>
-            <th class="text-left px-3 py-2">Card</th>
-            <th class="text-right px-3 py-2">Comp $</th>
-            <th class="text-left px-3 py-2">Status</th>
-            <th class="text-left px-3 py-2">eBay</th>
-            <th class="text-left px-3 py-2">Tags</th>
-            <th></th>
-          </tr>
-        </thead>
-        <tbody>
-          <template x-for="c in inventory" :key="c.id">
-            <tr class="border-t border-slate-800 hover:bg-slate-800/50">
-              <td class="px-3 py-2"><input type="checkbox" :value="c.id" x-model="selectedIds"></td>
-              <td class="px-3 py-2">
-                <div class="font-medium" x-text="c.title"></div>
-                <div class="text-xs text-slate-500" x-text="c.era + (c.condition?(' · '+c.condition):'')"></div>
-              </td>
-              <td class="px-3 py-2 text-right font-mono" x-text="'$'+formatNum(c.comp_median||c.est_value_raw||0)"></td>
-              <td class="px-3 py-2 text-xs" x-text="c.status"></td>
-              <td class="px-3 py-2 text-xs">
-                <span x-text="c.ebay_status"></span>
-              </td>
-              <td class="px-3 py-2 text-xs">
-                <span x-show="c.is_hit_watchlist" class="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300">HIT</span>
-                <span x-show="c.is_autograph" class="px-1.5 py-0.5 rounded bg-fuchsia-500/20 text-fuchsia-300">auto</span>
-                <span x-show="c.is_relic" class="px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300">relic</span>
-                <span x-show="c.is_graded" class="px-1.5 py-0.5 rounded bg-cyan-500/20 text-cyan-300">graded</span>
-              </td>
-              <td class="px-3 py-2 text-right">
-                <button @click="openCard(c)" class="text-xs px-2 py-1 rounded bg-slate-800 hover:bg-slate-700">edit</button>
-                <button @click="previewListing(c)" class="text-xs px-2 py-1 rounded bg-fuchsia-600/30 hover:bg-fuchsia-600/50 text-fuchsia-200">eBay</button>
-              </td>
-            </tr>
+
+    <div class="flex gap-4">
+
+      <!-- B2: Filter sidebar -->
+      <aside class="w-52 flex-shrink-0 space-y-4">
+
+        <!-- Active filter count / clear -->
+        <div class="flex items-center justify-between">
+          <span class="text-xs font-semibold text-slate-400 uppercase tracking-wide">Filters</span>
+          <button x-show="activeFilterCount() > 0" @click="clearAllFilters()"
+                  class="text-xs text-fuchsia-400 hover:text-fuchsia-200 focus:outline-none focus:ring-1 focus:ring-fuchsia-500 rounded">
+            Clear (<span x-text="activeFilterCount()"></span>)
+          </button>
+        </div>
+
+        <!-- Sort -->
+        <div>
+          <label class="block text-xs text-slate-400 mb-1">Sort</label>
+          <select x-model="sortBy" @change="applyFilters()"
+                  class="w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700 text-sm focus:outline-none focus:ring-2 focus:ring-fuchsia-500">
+            <option value="recent">Most recent</option>
+            <option value="value_desc">Value: high → low</option>
+            <option value="value_asc">Value: low → high</option>
+            <option value="year_desc">Year: newest</option>
+            <option value="year_asc">Year: oldest</option>
+            <option value="player_az">Player A→Z</option>
+          </select>
+        </div>
+
+        <!-- Quick toggles -->
+        <div class="space-y-1.5">
+          <label class="flex items-center gap-2 text-xs cursor-pointer">
+            <input type="checkbox" x-model="filterHits" @change="applyFilters()"
+                   class="rounded focus:ring-fuchsia-500"> Hits only
+          </label>
+          <label class="flex items-center gap-2 text-xs cursor-pointer">
+            <input type="checkbox" x-model="filterReview" @change="applyFilters()"
+                   class="rounded focus:ring-fuchsia-500"> Needs review
+          </label>
+          <label class="flex items-center gap-2 text-xs cursor-pointer">
+            <input type="checkbox" x-model="filterAutograph" @change="applyFilters()"
+                   class="rounded focus:ring-fuchsia-500"> Autograph
+          </label>
+          <label class="flex items-center gap-2 text-xs cursor-pointer">
+            <input type="checkbox" x-model="filterRelic" @change="applyFilters()"
+                   class="rounded focus:ring-fuchsia-500"> Relic
+          </label>
+          <label class="flex items-center gap-2 text-xs cursor-pointer">
+            <input type="checkbox" x-model="filterGraded" @change="applyFilters()"
+                   class="rounded focus:ring-fuchsia-500"> Graded
+          </label>
+        </div>
+
+        <!-- eBay status -->
+        <div>
+          <label class="block text-xs text-slate-400 mb-1">eBay Status</label>
+          <select x-model="filterEbayStatus" @change="applyFilters()"
+                  class="w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700 text-xs focus:outline-none focus:ring-2 focus:ring-fuchsia-500">
+            <option value="">Any</option>
+            <option value="not_listed">Not listed</option>
+            <option value="drafted">Drafted</option>
+            <option value="active">Active</option>
+            <option value="sold">Sold</option>
+          </select>
+        </div>
+
+        <!-- Value range -->
+        <div>
+          <label class="block text-xs text-slate-400 mb-1">Value range ($)</label>
+          <div class="flex gap-1">
+            <input type="number" x-model="filterMinValue" @change="applyFilters()" placeholder="Min"
+                   class="w-1/2 px-2 py-1 rounded bg-slate-800 border border-slate-700 text-xs focus:outline-none focus:ring-2 focus:ring-fuchsia-500">
+            <input type="number" x-model="filterMaxValue" @change="applyFilters()" placeholder="Max"
+                   class="w-1/2 px-2 py-1 rounded bg-slate-800 border border-slate-700 text-xs focus:outline-none focus:ring-2 focus:ring-fuchsia-500">
+          </div>
+          <!-- B2: Value bucket chips from facets -->
+          <div class="mt-1.5 flex flex-wrap gap-1">
+            <template x-for="[bucket, count] in Object.entries(facets.value_buckets||{})" :key="bucket">
+              <button @click="filterMinValue=(bucket.split('-')[0]||''); filterMaxValue=(bucket.includes('+')?'':bucket.split('-')[1]||''); applyFilters()"
+                      class="px-1.5 py-0.5 rounded text-[10px] bg-slate-800 hover:bg-slate-700 text-slate-400 focus:outline-none focus:ring-1 focus:ring-fuchsia-500"
+                      x-text="'$'+bucket+' ('+count+')'"></button>
+            </template>
+          </div>
+        </div>
+
+        <!-- Era chips from facets -->
+        <div>
+          <label class="block text-xs text-slate-400 mb-1">Era</label>
+          <div class="space-y-1">
+            <template x-for="[era, count] in Object.entries(facets.eras||{})" :key="era">
+              <button @click="toggleEraFilter(era)"
+                      :class="filterEra.includes(era) ? 'bg-fuchsia-600/40 text-fuchsia-200 border-fuchsia-500/40' : 'bg-slate-800 text-slate-400 border-slate-700 hover:bg-slate-700'"
+                      class="w-full text-left px-2 py-1 rounded text-[10px] border focus:outline-none focus:ring-1 focus:ring-fuchsia-500 truncate"
+                      :title="era">
+                <span x-text="era"></span>
+                <span class="float-right text-slate-500" x-text="count"></span>
+              </button>
+            </template>
+          </div>
+        </div>
+
+        <!-- Tag chips from facets -->
+        <div x-show="Object.keys(facets.tags||{}).length">
+          <label class="block text-xs text-slate-400 mb-1">Tags</label>
+          <div class="flex flex-wrap gap-1">
+            <template x-for="[tag, count] in Object.entries(facets.tags||{})" :key="tag">
+              <button x-show="count > 0"
+                      @click="if(tag==='autograph'){filterAutograph=!filterAutograph}else if(tag==='relic'){filterRelic=!filterRelic}else if(tag==='graded'){filterGraded=!filterGraded}else if(tag==='hit'){filterHits=!filterHits}; applyFilters()"
+                      :class="(tag==='autograph'&&filterAutograph)||(tag==='relic'&&filterRelic)||(tag==='graded'&&filterGraded)||(tag==='hit'&&filterHits) ? 'bg-fuchsia-600/40 text-fuchsia-200' : 'bg-slate-800 text-slate-400 hover:bg-slate-700'"
+                      class="px-1.5 py-0.5 rounded text-[10px] focus:outline-none focus:ring-1 focus:ring-fuchsia-500"
+                      x-text="tag+' ('+count+')'"></button>
+            </template>
+          </div>
+        </div>
+      </aside>
+
+      <!-- Main inventory panel -->
+      <div class="flex-1 min-w-0">
+
+        <!-- Search + result count -->
+        <div class="flex items-center gap-2 mb-3">
+          <input id="inv-search" x-model="search" @input.debounce.300ms="applyFilters()" placeholder="Search player or set..."
+                 class="flex-1 px-3 py-2 rounded bg-slate-900 border border-slate-800 text-sm focus:outline-none focus:ring-2 focus:ring-fuchsia-500">
+          <span class="text-xs text-slate-500 whitespace-nowrap">
+            <span x-text="invTotal"></span> cards
+            <template x-if="invLoading"><span class="ml-1 text-fuchsia-400">loading…</span></template>
+          </span>
+        </div>
+
+        <!-- B3: Bulk action toolbar (appears when ≥1 selected) -->
+        <div x-show="selectedIds.length > 0" x-transition
+             class="mb-3 flex flex-wrap items-center gap-2 px-3 py-2 rounded-lg bg-slate-900 border border-fuchsia-500/30">
+          <span class="text-xs text-slate-300 font-medium" x-text="selectedIds.length+' selected'"></span>
+
+          <!-- Select all matching -->
+          <button @click="selectAllMatching()"
+                  class="text-xs px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 focus:outline-none focus:ring-1 focus:ring-fuchsia-500">
+            Select all matching (<span x-text="invTotal"></span>)
+          </button>
+
+          <div class="h-4 border-l border-slate-700"></div>
+
+          <!-- Status → -->
+          <div class="relative" x-data="{open:false}">
+            <button @click="open=!open"
+                    class="text-xs px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 focus:outline-none focus:ring-1 focus:ring-fuchsia-500">
+              Status →
+            </button>
+            <div x-show="open" @click.outside="open=false" x-cloak
+                 class="absolute top-7 left-0 z-20 w-36 rounded-lg bg-slate-800 border border-slate-700 shadow-xl py-1">
+              <template x-for="s in ['Active','Sold','Bulk','Hold','Deleted']" :key="s">
+                <button @click="bulkPatchStatus(s); open=false"
+                        class="w-full text-left px-3 py-1.5 text-xs hover:bg-slate-700 focus:outline-none focus:bg-slate-700"
+                        x-text="s"></button>
+              </template>
+            </div>
+          </div>
+
+          <!-- Channel → -->
+          <div class="relative" x-data="{open:false}">
+            <button @click="open=!open"
+                    class="text-xs px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 focus:outline-none focus:ring-1 focus:ring-fuchsia-500">
+              Channel →
+            </button>
+            <div x-show="open" @click.outside="open=false" x-cloak
+                 class="absolute top-7 left-0 z-20 w-32 rounded-lg bg-slate-800 border border-slate-700 shadow-xl py-1">
+              <template x-for="ch in ['eBay','COMC','Local','Trade','Gift']" :key="ch">
+                <button @click="bulkPatchChannel(ch); open=false"
+                        class="w-full text-left px-3 py-1.5 text-xs hover:bg-slate-700 focus:outline-none focus:bg-slate-700"
+                        x-text="ch"></button>
+              </template>
+            </div>
+          </div>
+
+          <!-- Add note -->
+          <div class="relative" x-data="{open:false}">
+            <button @click="open=!open"
+                    class="text-xs px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 focus:outline-none focus:ring-1 focus:ring-fuchsia-500">
+              Add note
+            </button>
+            <div x-show="open" @click.outside="open=false" x-cloak
+                 class="absolute top-7 left-0 z-20 w-56 rounded-lg bg-slate-800 border border-slate-700 shadow-xl p-2">
+              <input x-model="bulkNoteText" placeholder="Note to append…"
+                     class="w-full px-2 py-1 rounded bg-slate-900 border border-slate-700 text-xs mb-1.5 focus:outline-none focus:ring-1 focus:ring-fuchsia-500">
+              <button @click="bulkAddNote(); open=false"
+                      class="w-full px-2 py-1 rounded bg-fuchsia-600 hover:bg-fuchsia-500 text-xs focus:outline-none focus:ring-1 focus:ring-fuchsia-400">
+                Append note
+              </button>
+            </div>
+          </div>
+
+          <!-- Recompute comps -->
+          <button @click="bulkRecomputeComps()"
+                  class="text-xs px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 focus:outline-none focus:ring-1 focus:ring-fuchsia-500">
+            Recompute comps
+          </button>
+
+          <!-- Move to bulk lot -->
+          <div class="relative" x-data="{open:false}">
+            <button @click="open=!open"
+                    class="text-xs px-2 py-1 rounded bg-slate-800 hover:bg-amber-900/50 text-amber-300 focus:outline-none focus:ring-1 focus:ring-amber-500">
+              Move to lot
+            </button>
+            <div x-show="open" @click.outside="open=false" x-cloak
+                 class="absolute top-7 left-0 z-20 w-56 rounded-lg bg-slate-800 border border-slate-700 shadow-xl p-2">
+              <input x-model="bulkLotLabel" placeholder="Lot label…"
+                     class="w-full px-2 py-1 rounded bg-slate-900 border border-slate-700 text-xs mb-1.5 focus:outline-none focus:ring-1 focus:ring-amber-500">
+              <button @click="bulkMoveToBulkLot(); open=false"
+                      class="w-full px-2 py-1 rounded bg-amber-600 hover:bg-amber-500 text-xs focus:outline-none focus:ring-1 focus:ring-amber-400">
+                Move to bulk lot
+              </button>
+            </div>
+          </div>
+
+          <!-- Delete -->
+          <button @click="bulkDelete()"
+                  class="text-xs px-2 py-1 rounded bg-rose-900/40 hover:bg-rose-900/70 text-rose-300 focus:outline-none focus:ring-1 focus:ring-rose-500">
+            Delete
+          </button>
+
+          <!-- Clear selection -->
+          <button @click="selectedIds=[]"
+                  class="ml-auto text-xs text-slate-500 hover:text-slate-300 focus:outline-none">
+            Clear
+          </button>
+        </div>
+
+        <!-- Inventory table with virtual scroller (B1) -->
+        <div class="rounded-xl bg-slate-900 border border-slate-800 overflow-hidden">
+          <!-- Table header (sticky) -->
+          <table class="w-full text-sm">
+            <thead class="bg-slate-800 text-slate-300">
+              <tr>
+                <th class="text-left px-3 py-2 w-8">
+                  <input type="checkbox" @change="toggleAll($event)"
+                         class="focus:ring-fuchsia-500">
+                </th>
+                <th class="text-left px-3 py-2">Card</th>
+                <th class="text-right px-3 py-2">Comp $</th>
+                <th class="text-left px-3 py-2">Status</th>
+                <th class="text-left px-3 py-2">eBay</th>
+                <th class="text-left px-3 py-2">Tags</th>
+                <th class="w-24"></th>
+              </tr>
+            </thead>
+          </table>
+
+          <!-- B1: Virtual scroll container -->
+          <div id="inv-scroll" class="inv-scroll-container"
+               @scroll="onInvScroll($el)"
+               x-init="$nextTick(() => { invViewportHeight = $el.clientHeight || 400; _refreshVirt(); })">
+
+            <!-- top spacer -->
+            <div :style="'height:'+virtPaddingTop+'px'"></div>
+
+            <!-- visible rows only -->
+            <table class="w-full text-sm">
+              <tbody>
+                <template x-for="(c, idx) in virtRows" :key="c.id">
+                  <tr class="inv-row border-t border-slate-800 hover:bg-slate-800/50 cursor-pointer"
+                      :class="{
+                        'bg-fuchsia-900/20 ring-1 ring-inset ring-fuchsia-500/40': focusedRowIndex === idx,
+                        'bg-slate-800/30': selectedIds.includes(c.id)
+                      }"
+                      @click="focusedRowIndex = idx"
+                      tabindex="0"
+                      @keydown.enter="openCard(c)"
+                      :aria-selected="selectedIds.includes(c.id)">
+                    <td class="px-3 py-2 w-8">
+                      <input type="checkbox" :value="c.id"
+                             :checked="selectedIds.includes(c.id)"
+                             @click.stop="toggleSelectRow(c.id)"
+                             class="focus:ring-fuchsia-500">
+                    </td>
+                    <td class="px-3 py-2">
+                      <div class="flex items-center gap-2">
+                        <!-- B6: lazy image -->
+                        <template x-if="c.front_image">
+                          <img :src="'/uploads/'+c.front_image" loading="lazy"
+                               class="w-8 h-8 object-cover rounded flex-shrink-0" alt="">
+                        </template>
+                        <div>
+                          <div class="font-medium leading-tight" x-text="c.title"></div>
+                          <div class="text-xs text-slate-500" x-text="c.era + (c.condition?(' · '+c.condition):'')"></div>
+                        </div>
+                      </div>
+                    </td>
+                    <td class="px-3 py-2 text-right font-mono" x-text="'$'+formatNum(c.comp_median||c.est_value_raw||0)"></td>
+                    <td class="px-3 py-2 text-xs" x-text="c.status"></td>
+                    <td class="px-3 py-2 text-xs">
+                      <span x-text="c.ebay_status"></span>
+                    </td>
+                    <td class="px-3 py-2 text-xs">
+                      <span x-show="c.is_hit_watchlist" class="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300">HIT</span>
+                      <span x-show="c.is_autograph" class="px-1.5 py-0.5 rounded bg-fuchsia-500/20 text-fuchsia-300">auto</span>
+                      <span x-show="c.is_relic" class="px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300">relic</span>
+                      <span x-show="c.is_graded" class="px-1.5 py-0.5 rounded bg-cyan-500/20 text-cyan-300">graded</span>
+                    </td>
+                    <td class="px-3 py-2 text-right">
+                      <button @click.stop="openCard(c)"
+                              class="text-xs px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 focus:outline-none focus:ring-1 focus:ring-fuchsia-500">
+                        edit
+                      </button>
+                      <button @click.stop="previewListing(c)"
+                              class="text-xs px-2 py-1 rounded bg-fuchsia-600/30 hover:bg-fuchsia-600/50 text-fuchsia-200 focus:outline-none focus:ring-1 focus:ring-fuchsia-400">
+                        eBay
+                      </button>
+                    </td>
+                  </tr>
+                </template>
+                <template x-if="!invLoading && inventory.length === 0">
+                  <tr>
+                    <td colspan="7" class="text-center text-slate-500 py-8">No matching cards.</td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+
+            <!-- bottom spacer -->
+            <div :style="'height:'+virtPaddingBottom+'px'"></div>
+          </div>
+        </div>
+
+        <!-- Pagination summary -->
+        <div class="mt-2 text-xs text-slate-500 text-right">
+          Showing <span x-text="virtRows.length"></span> of <span x-text="invTotal"></span> cards
+          <template x-if="invTotal > invLimit">
+            <span class="ml-2 text-amber-400">
+              (showing first <span x-text="invLimit"></span> — use filters to narrow results)
+            </span>
           </template>
-          <template x-if="!inventory.length">
-            <tr><td colspan="7" class="text-center text-slate-500 py-6">No matching cards.</td></tr>
-          </template>
-        </tbody>
-      </table>
-    </div>
-    <div class="mt-3 flex justify-between items-center text-sm" x-show="selectedIds.length">
-      <span x-text="selectedIds.length + ' selected'"></span>
-      <button @click="bulkList()" class="px-3 py-1.5 rounded bg-fuchsia-600 hover:bg-fuchsia-500">List selected on eBay</button>
+        </div>
+      </div>
     </div>
   </section>
 
+  <!-- ============================================================ R3-C1: SUGGESTIONS -->
+  <section x-show="tab==='Suggestions'" x-transition class="mt-4">
+    <div class="mb-4 flex items-center justify-between">
+      <div>
+        <h2 class="text-xl font-semibold">What to do next</h2>
+        <p class="text-sm text-slate-400">
+          AI-generated action items based on your inventory, comp data, and Hit Watchlist.
+        </p>
+      </div>
+      <button @click="loadSuggestions()"
+              class="text-xs px-3 py-1.5 rounded bg-slate-800 hover:bg-slate-700 focus:outline-none focus:ring-1 focus:ring-fuchsia-500">
+        ↻ Refresh
+      </button>
+    </div>
+
+    <!-- Loading state -->
+    <template x-if="suggestionsLoading">
+      <div class="text-center py-12 text-slate-500">Loading suggestions…</div>
+    </template>
+
+    <!-- Empty state -->
+    <template x-if="!suggestionsLoading && suggestions.length === 0">
+      <div class="text-center py-12 text-slate-500">
+        <div class="text-5xl mb-2">✨</div>
+        <p>Nothing to do right now. Add more cards or check back after the next sync.</p>
+      </div>
+    </template>
+
+    <!-- Grouped suggestion cards -->
+    <template x-for="group in suggestionsGrouped()" :key="group.kind">
+      <div class="mb-6">
+        <div class="flex items-baseline gap-2 mb-2">
+          <h3 class="text-sm font-semibold uppercase tracking-wide text-slate-300"
+              x-text="group.label"></h3>
+          <span class="text-xs text-slate-500" x-text="'(' + group.items.length + ')'"></span>
+        </div>
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+          <template x-for="item in group.items" :key="item.id + ':' + item.kind">
+            <div class="rounded-lg bg-slate-900 border border-slate-800 p-3 flex flex-col">
+              <div class="flex items-start justify-between gap-2 mb-2">
+                <div class="font-medium text-sm truncate" x-text="item.title"></div>
+                <span class="shrink-0 text-xs px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-mono"
+                      x-text="'$' + (item.value || 0).toFixed(2)"></span>
+              </div>
+              <p class="text-xs text-slate-400 flex-1 mb-3" x-text="item.reason"></p>
+              <div class="flex justify-end gap-2">
+                <template x-if="group.kind === 'grade'">
+                  <button @click="dismissSuggestion(item)"
+                          class="text-xs px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-400">Later</button>
+                </template>
+                <button @click="suggestionAction(item)"
+                        class="text-xs px-2 py-1 rounded bg-fuchsia-600 hover:bg-fuchsia-500 text-white focus:outline-none focus:ring-1 focus:ring-fuchsia-300">
+                  <span x-show="group.kind === 'grade'">Learn more</span>
+                  <span x-show="group.kind === 'bulk'">Move to bulk</span>
+                  <span x-show="group.kind === 'list'">List on eBay</span>
+                  <span x-show="group.kind === 'reshoot'">Mark needs reshoot</span>
+                  <span x-show="group.kind === 'verify_comps'">Verify comps</span>
+                </button>
+              </div>
+            </div>
+          </template>
+        </div>
+      </div>
+    </template>
+
+    <!-- C2: Grade info modal — replaced with "Add to grading queue" flow -->
+    <template x-if="showGradeInfoModal && gradeInfoCard">
+      <div class="fixed inset-0 z-40 grid place-items-center bg-slate-950/80 p-4"
+           @click.self="showGradeInfoModal = false; gradeInfoCard = null">
+        <div class="bg-slate-900 border border-slate-700 rounded-xl max-w-md p-5">
+          <div class="flex items-start justify-between mb-3">
+            <h3 class="text-lg font-semibold">Send for grading?</h3>
+            <button @click="showGradeInfoModal = false; gradeInfoCard = null"
+                    class="text-slate-400 hover:text-slate-200">✕</button>
+          </div>
+          <p class="text-sm text-slate-300 mb-2" x-text="gradeInfoCard.title"></p>
+          <p class="text-xs text-slate-400 mb-3" x-text="gradeInfoCard.reason"></p>
+          <div class="text-xs text-slate-400 leading-relaxed space-y-2">
+            <p>Grading typically runs <span class="text-fuchsia-300">$25-50</span> per card depending on the service and turnaround.</p>
+            <p>A PSA 9 on a $80 raw card often sells for <span class="text-emerald-300">$200+</span>; a 10 can multiply 5-10×.</p>
+            <p>Add to your grading queue, then send the whole batch at once via the <strong>Money tab</strong>.</p>
+          </div>
+          <div class="flex justify-end gap-2 mt-4">
+            <button @click="dismissSuggestion(gradeInfoCard); showGradeInfoModal = false; gradeInfoCard = null"
+                    class="px-3 py-1.5 rounded bg-slate-800 hover:bg-slate-700 text-sm">Later</button>
+            <button @click="addToGradingQueue(gradeInfoCard); showGradeInfoModal = false; gradeInfoCard = null"
+                    class="px-3 py-1.5 rounded bg-fuchsia-600 hover:bg-fuchsia-500 text-sm">Add to queue</button>
+          </div>
+        </div>
+      </div>
+    </template>
+  </section>
+
+  <!-- C2: Floating grading queue sidebar (shows when gradingQueue.length > 0) -->
+  <div x-show="gradingQueue.length > 0" x-cloak x-transition
+       class="fixed bottom-6 left-6 z-30 w-72 bg-slate-900 border border-fuchsia-500/40 rounded-xl shadow-2xl p-4">
+    <div class="flex items-center justify-between mb-3">
+      <h4 class="font-semibold text-sm">Grading queue <span class="ml-1 px-1.5 py-0.5 rounded bg-fuchsia-600/40 text-fuchsia-200 text-[10px]" x-text="gradingQueue.length"></span></h4>
+      <button @click="gradingQueue = []" class="text-xs text-slate-500 hover:text-slate-300">Clear</button>
+    </div>
+    <div class="text-xs text-slate-400 space-y-1 mb-3 max-h-28 overflow-y-auto">
+      <template x-for="item in gradingQueue" :key="item.id">
+        <div class="flex justify-between items-center">
+          <span class="truncate" x-text="item.title"></span>
+          <button @click="gradingQueue = gradingQueue.filter(g => g.id !== item.id)"
+                  class="ml-2 text-slate-600 hover:text-rose-400 flex-shrink-0">✕</button>
+        </div>
+      </template>
+    </div>
+    <div class="text-xs text-slate-500 mb-3">
+      Est. cost: <span class="text-fuchsia-300 font-mono" x-text="'$'+gradingEstCost()"></span>
+      &nbsp;·&nbsp; Projected value: <span class="text-emerald-300 font-mono" x-text="'$'+gradingProjectedValue()"></span>
+    </div>
+    <button @click="showGradingBatchModal = true"
+            class="w-full px-3 py-2 rounded bg-fuchsia-600 hover:bg-fuchsia-500 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-fuchsia-400">
+      Send batch →
+    </button>
+  </div>
+
+  <!-- C2: Send batch modal -->
+  <template x-if="showGradingBatchModal">
+    <div class="fixed inset-0 z-50 grid place-items-center bg-slate-950/80 p-4"
+         @click.self="showGradingBatchModal = false">
+      <div class="bg-slate-900 border border-slate-700 rounded-xl max-w-sm w-full p-5">
+        <div class="flex justify-between mb-4">
+          <h3 class="font-semibold">Send grading batch</h3>
+          <button @click="showGradingBatchModal = false" class="text-slate-400 hover:text-slate-200">✕</button>
+        </div>
+        <div class="space-y-3 text-sm">
+          <label class="block">
+            Service
+            <select x-model="gradingService"
+                    class="mt-1 w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700 focus:outline-none focus:ring-2 focus:ring-fuchsia-500">
+              <option value="PSA">PSA</option>
+              <option value="SGC">SGC</option>
+            </select>
+          </label>
+          <label class="block">
+            Service level
+            <select x-model="gradingServiceLevel"
+                    class="mt-1 w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700 focus:outline-none focus:ring-2 focus:ring-fuchsia-500">
+              <option value="Value">Value ($25)</option>
+              <option value="Regular">Regular ($75)</option>
+              <option value="Express">Express ($150)</option>
+            </select>
+          </label>
+        </div>
+        <p class="text-xs text-slate-500 mt-3">
+          This downloads a submission CSV, then marks the cards as pending grading.
+        </p>
+        <div class="flex justify-end gap-2 mt-4">
+          <button @click="showGradingBatchModal = false"
+                  class="px-3 py-1.5 rounded bg-slate-800 hover:bg-slate-700 text-sm">Cancel</button>
+          <button @click="sendGradingBatch()" :disabled="gradingBatchSending"
+                  class="px-3 py-1.5 rounded bg-fuchsia-600 hover:bg-fuchsia-500 text-sm disabled:opacity-50">
+            <span x-show="!gradingBatchSending">Download CSV & queue</span>
+            <span x-show="gradingBatchSending">Sending…</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  </template>
+
   <!-- ============================================================ LISTINGS -->
-  <section x-show="tab==='Listings'" x-transition>
+  <section x-show="tab==='Listings'" x-transition class="mt-4">
     <div class="flex justify-between mb-4">
       <h2 class="text-lg font-semibold">eBay listings</h2>
       <div class="text-xs text-slate-400">env: <span class="text-amber-300" x-text="env.ebay_env || 'sandbox'"></span></div>
@@ -291,7 +794,10 @@
               </td>
               <td class="px-3 py-2 text-xs font-mono text-slate-400" x-text="L.listing_id || L.sku"></td>
               <td class="px-3 py-2 text-right">
-                <button x-show="L.status==='active'" @click="markSold(L)" class="text-xs px-2 py-1 rounded bg-amber-600/30 hover:bg-amber-600/50 text-amber-200">mark sold</button>
+                <button x-show="L.status==='active'" @click="markSold(L)"
+                        class="text-xs px-2 py-1 rounded bg-amber-600/30 hover:bg-amber-600/50 text-amber-200 focus:outline-none focus:ring-1 focus:ring-amber-500">
+                  mark sold
+                </button>
               </td>
             </tr>
           </template>
@@ -303,8 +809,170 @@
     </div>
   </section>
 
+  <!-- ============================================================ C1: MONEY -->
+  <section x-show="tab==='Money'" x-transition class="mt-4">
+
+    <!-- Top controls -->
+    <div class="flex items-center justify-between mb-4">
+      <h2 class="text-xl font-semibold">Money</h2>
+      <button @click="syncEbaySales()"
+              :disabled="salesSyncing"
+              class="flex items-center gap-2 px-3 py-1.5 rounded bg-slate-800 hover:bg-slate-700 text-sm focus:outline-none focus:ring-2 focus:ring-fuchsia-500 disabled:opacity-50">
+        <span x-show="salesSyncing" class="animate-spin text-fuchsia-400">⟳</span>
+        <span x-show="!salesSyncing">↻</span>
+        Sync eBay sales
+      </button>
+    </div>
+
+    <!-- Stats card row -->
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
+      <div class="rounded-xl bg-slate-900 border border-slate-800 p-4">
+        <div class="text-xs text-slate-400 uppercase tracking-wide">Realized Net</div>
+        <div class="text-2xl font-bold mt-1 text-emerald-300"
+             x-text="'$'+formatNum(salesSummary.realized_net||0)"></div>
+        <div class="text-xs text-slate-500 mt-1">lifetime</div>
+      </div>
+      <div class="rounded-xl bg-slate-900 border border-slate-800 p-4">
+        <div class="text-xs text-slate-400 uppercase tracking-wide">This Month</div>
+        <div class="text-2xl font-bold mt-1 text-fuchsia-300"
+             x-text="'$'+formatNum(salesMonthNet())"></div>
+        <div class="text-xs text-slate-500 mt-1">net realized</div>
+      </div>
+      <div class="rounded-xl bg-slate-900 border border-slate-800 p-4">
+        <div class="text-xs text-slate-400 uppercase tracking-wide">Fees Total</div>
+        <div class="text-2xl font-bold mt-1 text-rose-300"
+             x-text="'$'+formatNum(salesSummary.fees_total||0)"></div>
+        <div class="text-xs text-slate-500 mt-1">lifetime</div>
+      </div>
+      <div class="rounded-xl bg-slate-900 border border-slate-800 p-4">
+        <div class="text-xs text-slate-400 uppercase tracking-wide">Avg Sell-Through</div>
+        <div class="text-2xl font-bold mt-1 text-amber-300"
+             x-text="(salesSummary.sell_through_days_avg||0).toFixed(1)+'d'"></div>
+        <div class="text-xs text-slate-500 mt-1">days to sell</div>
+      </div>
+    </div>
+
+    <!-- Charts row -->
+    <div class="grid md:grid-cols-2 gap-4 mb-6">
+      <!-- Monthly P&L chart -->
+      <div class="rounded-xl bg-slate-900 border border-slate-800 p-4">
+        <h3 class="font-semibold mb-3 text-sm">Monthly P&L</h3>
+        <canvas id="salesByMonthChart" height="200"></canvas>
+      </div>
+      <!-- Channel breakdown donut -->
+      <div class="rounded-xl bg-slate-900 border border-slate-800 p-4">
+        <h3 class="font-semibold mb-3 text-sm">Channel Breakdown</h3>
+        <canvas id="salesChannelChart" height="200"></canvas>
+      </div>
+    </div>
+
+    <!-- Recent sales table -->
+    <div class="rounded-xl bg-slate-900 border border-slate-800 overflow-hidden mb-6">
+      <div class="flex justify-between items-center p-4 border-b border-slate-800">
+        <h3 class="font-semibold text-sm">Recent Sales</h3>
+        <button @click="showManualSaleModal = true"
+                class="text-xs px-3 py-1.5 rounded bg-fuchsia-600 hover:bg-fuchsia-500 focus:outline-none focus:ring-2 focus:ring-fuchsia-400">
+          + Manual sale
+        </button>
+      </div>
+      <table class="w-full text-sm">
+        <thead class="bg-slate-800 text-slate-300 text-xs">
+          <tr>
+            <th class="text-left px-3 py-2">Card</th>
+            <th class="text-right px-3 py-2">Sold $</th>
+            <th class="text-right px-3 py-2">Fees</th>
+            <th class="text-right px-3 py-2">Net</th>
+            <th class="text-left px-3 py-2">Channel</th>
+            <th class="text-left px-3 py-2">Date</th>
+          </tr>
+        </thead>
+        <tbody>
+          <template x-for="s in recentSales" :key="s.id">
+            <tr class="border-t border-slate-800 hover:bg-slate-800/30">
+              <td class="px-3 py-2 truncate max-w-xs" x-text="s.title || s.card_title || '—'"></td>
+              <td class="px-3 py-2 text-right font-mono text-emerald-300" x-text="'$'+formatNum(s.sold_price||0)"></td>
+              <td class="px-3 py-2 text-right font-mono text-rose-300" x-text="'$'+formatNum(s.fee||s.fees||0)"></td>
+              <td class="px-3 py-2 text-right font-mono text-fuchsia-300" x-text="'$'+formatNum(s.net||0)"></td>
+              <td class="px-3 py-2 text-xs text-slate-400" x-text="s.channel||s.sale_channel||'—'"></td>
+              <td class="px-3 py-2 text-xs text-slate-500" x-text="s.sold_at ? new Date(s.sold_at).toLocaleDateString() : '—'"></td>
+            </tr>
+          </template>
+          <template x-if="!recentSales.length">
+            <tr>
+              <td colspan="6" class="text-center text-slate-500 py-6">
+                No sales yet. Mark cards as sold or sync your eBay account.
+              </td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- C2: Grading queues panel -->
+    <div class="rounded-xl bg-slate-900 border border-slate-800 p-4 mb-6">
+      <div class="flex items-center justify-between mb-3">
+        <h3 class="font-semibold text-sm">Grading Queues</h3>
+        <button @click="loadGradingQueues()" class="text-xs text-slate-400 hover:text-slate-200">↻ Refresh</button>
+      </div>
+      <template x-if="!gradingQueues.length">
+        <p class="text-sm text-slate-500">No in-flight grading submissions. Add cards from the Suggestions tab.</p>
+      </template>
+      <template x-for="q in gradingQueues" :key="q.submission_id">
+        <div class="border border-slate-700 rounded-lg p-3 mb-2">
+          <div class="flex items-center justify-between">
+            <div>
+              <span class="text-sm font-medium" x-text="q.service + ' ' + q.service_level"></span>
+              <span class="ml-2 text-xs text-slate-400" x-text="q.card_count + ' cards · sent ' + (q.sent_at ? new Date(q.sent_at).toLocaleDateString() : '—')"></span>
+            </div>
+            <button @click="openMarkBackModal(q)"
+                    class="text-xs px-2 py-1 rounded bg-amber-600/30 hover:bg-amber-600/50 text-amber-200 focus:outline-none focus:ring-1 focus:ring-amber-500">
+              Mark batch back
+            </button>
+          </div>
+        </div>
+      </template>
+    </div>
+
+    <!-- C3: Bulk lot proposals -->
+    <div class="rounded-xl bg-slate-900 border border-slate-800 p-4">
+      <div class="flex items-center justify-between mb-3">
+        <h3 class="font-semibold text-sm">Bulk lot proposals</h3>
+        <button @click="loadBulkLotProposals()" class="text-xs text-slate-400 hover:text-slate-200">↻ Refresh</button>
+      </div>
+      <template x-if="!bulkLotProposals.length">
+        <p class="text-sm text-slate-500">No bulk lot proposals available. Proposals appear when you have enough sub-$1 commons to group.</p>
+      </template>
+      <div class="grid md:grid-cols-2 gap-3">
+        <template x-for="(proposal, idx) in bulkLotProposals" :key="idx">
+          <div class="border border-slate-700 rounded-lg p-3">
+            <div class="flex items-start justify-between gap-2 mb-2">
+              <div class="font-medium text-sm" x-text="proposal.cluster_label"></div>
+              <span class="shrink-0 text-xs px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 font-mono"
+                    x-text="'$'+formatNum(proposal.estimated_value||0)"></span>
+            </div>
+            <div class="text-xs text-slate-400 mb-1">
+              <span x-text="proposal.count"></span> cards · Suggest price:
+              <span class="text-emerald-300 font-mono" x-text="'$'+formatNum(proposal.suggested_price||0)"></span>
+            </div>
+            <div class="text-xs text-slate-500 mb-3 truncate" x-text="proposal.suggested_title"></div>
+            <div class="flex gap-2">
+              <button @click="openBuildLotModal(proposal)"
+                      class="text-xs px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 focus:outline-none focus:ring-1 focus:ring-fuchsia-500">
+                Build lot
+              </button>
+              <button @click="buildAndListLot(proposal)"
+                      class="text-xs px-2 py-1 rounded bg-fuchsia-600/30 hover:bg-fuchsia-600/50 text-fuchsia-200 focus:outline-none focus:ring-1 focus:ring-fuchsia-400">
+                Build + list on eBay
+              </button>
+            </div>
+          </div>
+        </template>
+      </div>
+    </div>
+  </section>
+
   <!-- ============================================================ ACHIEVEMENTS -->
-  <section x-show="tab==='Achievements'" x-transition>
+  <section x-show="tab==='Achievements'" x-transition class="mt-4">
     <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
       <template x-for="a in achievements" :key="a.code">
         <div class="rounded-xl border p-4 transition-all"
@@ -320,46 +988,193 @@
     </div>
   </section>
 
+  <!-- ============================================================ MODALS -->
+
   <!-- card edit modal -->
   <div x-show="editing" x-cloak class="fixed inset-0 bg-slate-950/80 backdrop-blur grid place-items-center z-40 p-6"
        @keydown.escape.window="editing=null">
     <div class="bg-slate-900 border border-slate-700 rounded-xl p-5 max-w-lg w-full" @click.outside="editing=null" x-show="editing">
-      <h3 class="font-semibold mb-3" x-text="editing?.title"></h3>
+      <div class="flex items-start justify-between mb-3">
+        <h3 class="font-semibold" x-text="editing?.title"></h3>
+        <!-- C4: Re-identify button -->
+        <button @click="reidentifyCard()" :disabled="reidentifySpinner"
+                class="flex items-center gap-1 text-xs px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-400 focus:outline-none focus:ring-1 focus:ring-fuchsia-500 disabled:opacity-50">
+          <span x-show="reidentifySpinner" class="animate-spin text-fuchsia-400">⟳</span>
+          <span x-show="!reidentifySpinner">🔍</span>
+          Re-identify
+        </button>
+      </div>
+      <!-- C2: grading submission chip if in a submission -->
+      <template x-if="editing && editing.grading_submission_id">
+        <div class="mb-3 inline-flex items-center gap-1 px-2 py-1 rounded bg-fuchsia-900/30 border border-fuchsia-500/30 text-xs text-fuchsia-300">
+          📦 <span x-text="(editing.grade||'PSA/SGC').split(' ')[0] || 'Grading'"></span> submission queued
+        </div>
+      </template>
       <div class="grid grid-cols-2 gap-3 text-sm" x-show="editing">
-        <label class="block">Year<input type="number" x-model.number="editing.year" class="mt-1 w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700"></label>
-        <label class="block">Set<input x-model="editing.set_brand" class="mt-1 w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700"></label>
-        <label class="block">Player<input x-model="editing.player" class="mt-1 w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700"></label>
-        <label class="block">Card #<input x-model="editing.card_no" class="mt-1 w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700"></label>
-        <label class="block">Parallel<input x-model="editing.parallel" class="mt-1 w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700"></label>
-        <label class="block">Condition<input x-model="editing.condition" class="mt-1 w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700"></label>
-        <label class="block">Est value<input type="number" step="0.01" x-model.number="editing.est_value_raw" class="mt-1 w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700"></label>
-        <label class="block">Status<input x-model="editing.status" class="mt-1 w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700"></label>
-        <label class="col-span-2 block">Notes<textarea x-model="editing.notes" rows="2" class="mt-1 w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700"></textarea></label>
+        <label class="block">Year<input type="number" x-model.number="editing.year" class="mt-1 w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700 focus:outline-none focus:ring-2 focus:ring-fuchsia-500"></label>
+        <label class="block">Set<input x-model="editing.set_brand" class="mt-1 w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700 focus:outline-none focus:ring-2 focus:ring-fuchsia-500"></label>
+        <label class="block">Player<input x-model="editing.player" class="mt-1 w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700 focus:outline-none focus:ring-2 focus:ring-fuchsia-500"></label>
+        <label class="block">Card #<input x-model="editing.card_no" class="mt-1 w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700 focus:outline-none focus:ring-2 focus:ring-fuchsia-500"></label>
+        <label class="block">Parallel<input x-model="editing.parallel" class="mt-1 w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700 focus:outline-none focus:ring-2 focus:ring-fuchsia-500"></label>
+        <label class="block">Condition<input x-model="editing.condition" class="mt-1 w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700 focus:outline-none focus:ring-2 focus:ring-fuchsia-500"></label>
+        <label class="block">Est value<input type="number" step="0.01" x-model.number="editing.est_value_raw" class="mt-1 w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700 focus:outline-none focus:ring-2 focus:ring-fuchsia-500"></label>
+        <label class="block">Status<input x-model="editing.status" class="mt-1 w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700 focus:outline-none focus:ring-2 focus:ring-fuchsia-500"></label>
+        <label class="col-span-2 block">Notes<textarea x-model="editing.notes" rows="2" class="mt-1 w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700 focus:outline-none focus:ring-2 focus:ring-fuchsia-500"></textarea></label>
       </div>
       <div class="flex justify-between mt-4">
-        <button @click="deleteCard()" class="text-xs text-rose-400 hover:text-rose-200">delete</button>
+        <button @click="deleteCard()" class="text-xs text-rose-400 hover:text-rose-200 focus:outline-none focus:ring-1 focus:ring-rose-500 rounded">delete</button>
         <div class="flex gap-2">
-          <button @click="editing=null" class="px-3 py-1.5 rounded bg-slate-800">cancel</button>
-          <button @click="saveCard()" class="px-3 py-1.5 rounded bg-fuchsia-600 hover:bg-fuchsia-500">save</button>
+          <button @click="editing=null" class="px-3 py-1.5 rounded bg-slate-800 focus:outline-none focus:ring-2 focus:ring-slate-600">cancel</button>
+          <button @click="saveCard()" class="px-3 py-1.5 rounded bg-fuchsia-600 hover:bg-fuchsia-500 focus:outline-none focus:ring-2 focus:ring-fuchsia-400">save</button>
         </div>
       </div>
     </div>
   </div>
+
+  <!-- C1: Manual sale modal -->
+  <template x-if="showManualSaleModal">
+    <div class="fixed inset-0 z-50 grid place-items-center bg-slate-950/80 p-4"
+         @click.self="showManualSaleModal = false">
+      <div class="bg-slate-900 border border-slate-700 rounded-xl max-w-sm w-full p-5">
+        <div class="flex justify-between mb-4">
+          <h3 class="font-semibold">Record manual sale</h3>
+          <button @click="showManualSaleModal = false" class="text-slate-400 hover:text-slate-200">✕</button>
+        </div>
+        <div class="space-y-3 text-sm">
+          <label class="block">
+            Listing ID (or card ID)
+            <input type="number" x-model.number="manualSale.listing_id" placeholder="Enter ID…"
+                   class="mt-1 w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700 focus:outline-none focus:ring-2 focus:ring-fuchsia-500">
+          </label>
+          <label class="block">
+            Sold price ($)
+            <input type="number" step="0.01" x-model.number="manualSale.sold_price" placeholder="0.00"
+                   class="mt-1 w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700 focus:outline-none focus:ring-2 focus:ring-fuchsia-500">
+          </label>
+          <label class="block">
+            Fees ($)
+            <input type="number" step="0.01" x-model.number="manualSale.fees" placeholder="0.00"
+                   class="mt-1 w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700 focus:outline-none focus:ring-2 focus:ring-fuchsia-500">
+          </label>
+          <label class="block">
+            Channel
+            <select x-model="manualSale.channel"
+                    class="mt-1 w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700 focus:outline-none focus:ring-2 focus:ring-fuchsia-500">
+              <option value="eBay">eBay</option>
+              <option value="FB">Facebook</option>
+              <option value="LCS">LCS</option>
+              <option value="Other">Other</option>
+            </select>
+          </label>
+          <label class="block">
+            Sold date
+            <input type="date" x-model="manualSale.sold_at"
+                   class="mt-1 w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700 focus:outline-none focus:ring-2 focus:ring-fuchsia-500">
+          </label>
+        </div>
+        <div class="flex justify-end gap-2 mt-4">
+          <button @click="showManualSaleModal = false"
+                  class="px-3 py-1.5 rounded bg-slate-800 hover:bg-slate-700 text-sm">Cancel</button>
+          <button @click="submitManualSale()"
+                  class="px-3 py-1.5 rounded bg-fuchsia-600 hover:bg-fuchsia-500 text-sm focus:outline-none focus:ring-2 focus:ring-fuchsia-400">
+            Record sale
+          </button>
+        </div>
+      </div>
+    </div>
+  </template>
+
+  <!-- C2: Mark batch back modal -->
+  <template x-if="showMarkBackModal && markBackQueue">
+    <div class="fixed inset-0 z-50 grid place-items-center bg-slate-950/80 p-4"
+         @click.self="showMarkBackModal = false">
+      <div class="bg-slate-900 border border-slate-700 rounded-xl max-w-md w-full p-5 max-h-screen overflow-y-auto">
+        <div class="flex justify-between mb-4">
+          <h3 class="font-semibold">Mark batch back — enter grades</h3>
+          <button @click="showMarkBackModal = false" class="text-slate-400 hover:text-slate-200">✕</button>
+        </div>
+        <p class="text-xs text-slate-400 mb-3" x-text="markBackQueue.service + ' ' + markBackQueue.service_level + ' · ' + markBackQueue.card_count + ' cards'"></p>
+        <div class="space-y-2 mb-4">
+          <template x-for="(entry, idx) in markBackGrades" :key="idx">
+            <div class="flex items-center gap-2 text-sm">
+              <span class="flex-1 truncate text-xs text-slate-400" x-text="entry.card_title || ('Card #' + entry.card_id)"></span>
+              <select x-model="entry.grade"
+                      class="w-24 px-1.5 py-1 rounded bg-slate-800 border border-slate-700 text-xs focus:outline-none focus:ring-1 focus:ring-fuchsia-500">
+                <option value="">—</option>
+                <template x-for="g in [1,2,3,4,5,6,7,8,8.5,9,9.5,10]" :key="g">
+                  <option :value="String(g)" x-text="g"></option>
+                </template>
+              </select>
+            </div>
+          </template>
+        </div>
+        <div class="flex justify-end gap-2">
+          <button @click="showMarkBackModal = false"
+                  class="px-3 py-1.5 rounded bg-slate-800 hover:bg-slate-700 text-sm">Cancel</button>
+          <button @click="submitMarkBack()"
+                  class="px-3 py-1.5 rounded bg-emerald-600 hover:bg-emerald-500 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400">
+            Submit grades
+          </button>
+        </div>
+      </div>
+    </div>
+  </template>
+
+  <!-- C3: Build lot modal -->
+  <template x-if="showBuildLotModal && activeLotProposal">
+    <div class="fixed inset-0 z-50 grid place-items-center bg-slate-950/80 p-4"
+         @click.self="showBuildLotModal = false">
+      <div class="bg-slate-900 border border-slate-700 rounded-xl max-w-md w-full p-5">
+        <div class="flex justify-between mb-4">
+          <h3 class="font-semibold">Build bulk lot</h3>
+          <button @click="showBuildLotModal = false" class="text-slate-400 hover:text-slate-200">✕</button>
+        </div>
+        <div class="space-y-3 text-sm">
+          <label class="block">
+            Title
+            <input x-model="buildLotTitle" maxlength="80"
+                   class="mt-1 w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700 focus:outline-none focus:ring-2 focus:ring-fuchsia-500">
+          </label>
+          <label class="block">
+            Price ($)
+            <input type="number" step="0.01" x-model.number="buildLotPrice"
+                   class="mt-1 w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700 focus:outline-none focus:ring-2 focus:ring-fuchsia-500">
+          </label>
+          <div>
+            <p class="text-xs text-slate-400 mb-1">Card IDs (<span x-text="buildLotCardIds.length"></span>)</p>
+            <textarea x-model="buildLotIdsText" rows="3"
+                      class="w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-fuchsia-500"
+                      placeholder="One ID per line"></textarea>
+          </div>
+        </div>
+        <div class="flex justify-end gap-2 mt-4">
+          <button @click="showBuildLotModal = false"
+                  class="px-3 py-1.5 rounded bg-slate-800 hover:bg-slate-700 text-sm">Cancel</button>
+          <button @click="submitBuildLot(false)"
+                  class="px-3 py-1.5 rounded bg-slate-700 hover:bg-slate-600 text-sm">Build lot</button>
+          <button @click="submitBuildLot(true)"
+                  class="px-3 py-1.5 rounded bg-fuchsia-600 hover:bg-fuchsia-500 text-sm focus:outline-none focus:ring-2 focus:ring-fuchsia-400">
+            Build + list on eBay
+          </button>
+        </div>
+      </div>
+    </div>
+  </template>
 
   <!-- listing preview modal -->
   <div x-show="listingPreview" x-cloak class="fixed inset-0 bg-slate-950/80 backdrop-blur grid place-items-center z-40 p-6">
     <div class="bg-slate-900 border border-slate-700 rounded-xl p-5 max-w-2xl w-full" @click.outside="listingPreview=null" x-show="listingPreview">
       <h3 class="font-semibold mb-3">📦 eBay listing draft <span class="text-xs text-amber-300" x-text="env.ebay_env"></span></h3>
       <div class="grid grid-cols-2 gap-3 text-sm" x-show="listingPreview">
-        <label class="col-span-2 block">Title<input x-model="listingPreview.title" maxlength="80" class="mt-1 w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700"></label>
+        <label class="col-span-2 block">Title<input x-model="listingPreview.title" maxlength="80" class="mt-1 w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700 focus:outline-none focus:ring-2 focus:ring-fuchsia-500"></label>
         <label class="block">Format
-          <select x-model="listingPreview.format" class="mt-1 w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700">
+          <select x-model="listingPreview.format" class="mt-1 w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700 focus:outline-none focus:ring-2 focus:ring-fuchsia-500">
             <option>AUCTION</option><option>FIXED_PRICE</option>
           </select>
         </label>
-        <label class="block">Price ($)<input type="number" step="0.01" x-model.number="listingPreview.price" class="mt-1 w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700"></label>
-        <label class="block">Duration<input x-model="listingPreview.duration" class="mt-1 w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700"></label>
-        <label class="block">Shipping default<input x-model="listingPreview.shipping_default" class="mt-1 w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700"></label>
+        <label class="block">Price ($)<input type="number" step="0.01" x-model.number="listingPreview.price" class="mt-1 w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700 focus:outline-none focus:ring-2 focus:ring-fuchsia-500"></label>
+        <label class="block">Duration<input x-model="listingPreview.duration" class="mt-1 w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700 focus:outline-none focus:ring-2 focus:ring-fuchsia-500"></label>
+        <label class="block">Shipping default<input x-model="listingPreview.shipping_default" class="mt-1 w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700 focus:outline-none focus:ring-2 focus:ring-fuchsia-500"></label>
         <div class="col-span-2 grid grid-cols-3 gap-2 text-xs text-slate-400">
           <div>Comp median <span class="text-slate-200 font-mono" x-text="'$'+formatNum(listingPreview.comp_median||0)"></span></div>
           <div>Est. fees <span class="text-rose-300 font-mono" x-text="'$'+formatNum(listingPreview.expected_fees||0)"></span></div>
@@ -367,10 +1182,10 @@
         </div>
       </div>
       <div class="flex justify-between mt-4">
-        <button @click="listingPreview=null" class="px-3 py-1.5 rounded bg-slate-800">cancel</button>
+        <button @click="listingPreview=null" class="px-3 py-1.5 rounded bg-slate-800 focus:outline-none focus:ring-2 focus:ring-slate-600">cancel</button>
         <div class="flex gap-2">
-          <button @click="publishListing(false)" class="px-3 py-1.5 rounded bg-slate-700 hover:bg-slate-600">save draft</button>
-          <button @click="publishListing(true)" class="px-3 py-1.5 rounded bg-fuchsia-600 hover:bg-fuchsia-500">publish</button>
+          <button @click="publishListing(false)" class="px-3 py-1.5 rounded bg-slate-700 hover:bg-slate-600 focus:outline-none focus:ring-2 focus:ring-slate-500">save draft</button>
+          <button @click="publishListing(true)" class="px-3 py-1.5 rounded bg-fuchsia-600 hover:bg-fuchsia-500 focus:outline-none focus:ring-2 focus:ring-fuchsia-400">publish</button>
         </div>
       </div>
     </div>
@@ -385,26 +1200,76 @@
           <div class="font-medium mb-1">Anthropic API key (Claude vision)</div>
           <p class="text-xs text-slate-400 mb-2">Anthropic doesn't offer end-user OAuth for third-party apps. Paste your key — stored only in this browser's localStorage; never sent to anyone but api.anthropic.com.</p>
           <input type="password" x-model="anthropicKey" placeholder="sk-ant-..."
-                 class="w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700 text-xs font-mono">
-          <button @click="saveKey()" class="mt-2 text-xs px-3 py-1 rounded bg-fuchsia-600">save</button>
+                 class="w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-fuchsia-500">
+          <button @click="saveKey()" class="mt-2 text-xs px-3 py-1 rounded bg-fuchsia-600 focus:outline-none focus:ring-2 focus:ring-fuchsia-400">save</button>
           <span class="ml-2 text-xs text-emerald-400" x-show="keySaved">saved ✓</span>
         </div>
         <div class="border border-slate-800 rounded p-3">
           <div class="font-medium mb-1">Google Sheets</div>
           <p class="text-xs text-slate-400 mb-2">OAuth into your own Google account. Mirrors every save into your CardScanner Inventory spreadsheet.</p>
-          <a href="/api/auth/google/start" target="_blank" class="text-xs px-3 py-1 rounded bg-fuchsia-600 inline-block">Connect Google</a>
+          <a href="/api/auth/google/start" target="_blank" class="text-xs px-3 py-1 rounded bg-fuchsia-600 inline-block focus:outline-none focus:ring-2 focus:ring-fuchsia-400">Connect Google</a>
           <span class="ml-2 text-xs" :class="env.google ? 'text-emerald-400':'text-slate-500'" x-text="env.google ? 'connected ✓' : 'not connected'"></span>
         </div>
         <div class="border border-slate-800 rounded p-3">
           <div class="font-medium mb-1">eBay (<span x-text="env.ebay_env || 'sandbox'"></span>)</div>
           <p class="text-xs text-slate-400 mb-2">Phase 1: sandbox (free, instant). Phase 2: flip EBAY_ENV=production once eBay approves your prod keyset.</p>
-          <a href="/api/auth/ebay/start" target="_blank" class="text-xs px-3 py-1 rounded bg-fuchsia-600 inline-block">Connect eBay</a>
+          <a href="/api/auth/ebay/start" target="_blank" class="text-xs px-3 py-1 rounded bg-fuchsia-600 inline-block focus:outline-none focus:ring-2 focus:ring-fuchsia-400">Connect eBay</a>
           <span class="ml-2 text-xs" :class="env.ebay_connected ? 'text-emerald-400':'text-slate-500'" x-text="env.ebay_connected ? 'connected ✓' : (env.ebay_configured ? 'not connected' : 'app keys missing')"></span>
         </div>
       </div>
       <div class="flex justify-end mt-4">
-        <button @click="openSettings=false" class="px-3 py-1.5 rounded bg-slate-800">close</button>
+        <button @click="openSettings=false" class="px-3 py-1.5 rounded bg-slate-800 focus:outline-none focus:ring-2 focus:ring-slate-600">close</button>
       </div>
+    </div>
+  </div>
+
+  <!-- B4: Keyboard help overlay -->
+  <div x-show="showKeyboardHelp" x-cloak x-transition.duration.200ms
+       class="fixed inset-0 bg-slate-950/80 backdrop-blur grid place-items-center z-50 p-6"
+       @keydown.escape.window="showKeyboardHelp=false"
+       @click.self="showKeyboardHelp=false">
+    <div class="bg-slate-900 border border-slate-700 rounded-xl p-6 max-w-sm w-full shadow-2xl">
+      <div class="flex justify-between items-center mb-4">
+        <h3 class="font-semibold">Keyboard shortcuts</h3>
+        <button @click="showKeyboardHelp=false"
+                class="text-slate-400 hover:text-slate-200 focus:outline-none focus:ring-1 focus:ring-fuchsia-500 rounded">✕</button>
+      </div>
+      <table class="w-full text-sm">
+        <tbody class="divide-y divide-slate-800">
+          <tr class="py-1.5">
+            <td class="py-1.5 pr-4"><kbd class="px-2 py-0.5 rounded bg-slate-800 font-mono text-xs text-slate-300">j / k</kbd></td>
+            <td class="py-1.5 text-slate-400">Move row focus down / up</td>
+          </tr>
+          <tr>
+            <td class="py-1.5 pr-4"><kbd class="px-2 py-0.5 rounded bg-slate-800 font-mono text-xs text-slate-300">x</kbd></td>
+            <td class="py-1.5 text-slate-400">Toggle select focused row</td>
+          </tr>
+          <tr>
+            <td class="py-1.5 pr-4"><kbd class="px-2 py-0.5 rounded bg-slate-800 font-mono text-xs text-slate-300">e</kbd></td>
+            <td class="py-1.5 text-slate-400">Edit focused card</td>
+          </tr>
+          <tr>
+            <td class="py-1.5 pr-4"><kbd class="px-2 py-0.5 rounded bg-slate-800 font-mono text-xs text-slate-300">l</kbd></td>
+            <td class="py-1.5 text-slate-400">Open eBay listing for focused card</td>
+          </tr>
+          <tr>
+            <td class="py-1.5 pr-4"><kbd class="px-2 py-0.5 rounded bg-slate-800 font-mono text-xs text-slate-300">/</kbd></td>
+            <td class="py-1.5 text-slate-400">Focus search box</td>
+          </tr>
+          <tr>
+            <td class="py-1.5 pr-4"><kbd class="px-2 py-0.5 rounded bg-slate-800 font-mono text-xs text-slate-300">g h</kbd></td>
+            <td class="py-1.5 text-slate-400">Jump to top of list</td>
+          </tr>
+          <tr>
+            <td class="py-1.5 pr-4"><kbd class="px-2 py-0.5 rounded bg-slate-800 font-mono text-xs text-slate-300">?</kbd></td>
+            <td class="py-1.5 text-slate-400">Toggle this help overlay</td>
+          </tr>
+          <tr>
+            <td class="py-1.5 pr-4"><kbd class="px-2 py-0.5 rounded bg-slate-800 font-mono text-xs text-slate-300">Esc</kbd></td>
+            <td class="py-1.5 text-slate-400">Close modal / clear focus</td>
+          </tr>
+        </tbody>
+      </table>
     </div>
   </div>
 
