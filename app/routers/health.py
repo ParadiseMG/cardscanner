@@ -11,7 +11,7 @@ from sqlmodel import select
 from app import models, migrations
 from app.config import settings
 from app.db import get_engine, session
-from app.services import sheets_sync, ebay_listing
+from app.services import sheets_sync, ebay_listing, claude_vision
 
 router = APIRouter()
 
@@ -62,17 +62,27 @@ async def _check_ebay() -> dict:
 
 
 async def _check_claude() -> dict:
-    """Lightweight reachability test of api.anthropic.com (no key needed)."""
+    """Report active backend (cli/http) and a basic reachability check."""
+    backend = claude_vision.active_backend()
+    cli_avail = claude_vision.cli_available()
+
+    if backend == "cli":
+        # Don't actually invoke claude — just confirm the binary resolves.
+        return {"ok": cli_avail, "backend": "cli", "cli_available": cli_avail}
+
+    # HTTP backend — confirm a key is set and api.anthropic.com is reachable
     if not settings.anthropic_api_key:
-        return {"ok": False, "key_present": False}
+        return {"ok": False, "backend": "http", "key_present": False,
+                "cli_available": cli_avail}
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
-            # GET to /v1/messages 405s without auth -- still tells us the host is reachable
             r = await client.get("https://api.anthropic.com/v1/messages",
                                  timeout=5.0)
-            return {"ok": True, "key_present": True, "reachable_status": r.status_code}
+            return {"ok": True, "backend": "http", "key_present": True,
+                    "reachable_status": r.status_code, "cli_available": cli_avail}
     except Exception as e:
-        return {"ok": False, "key_present": True, "error": str(e)}
+        return {"ok": False, "backend": "http", "key_present": True,
+                "error": str(e), "cli_available": cli_avail}
 
 
 @router.get("/health")

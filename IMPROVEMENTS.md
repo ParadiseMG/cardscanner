@@ -264,6 +264,33 @@ Two sandbox-permission quirks I couldn't unstick:
 
 ---
 
+## Post-R4: CLI backend for Claude vision
+
+Removes the API-key dependency for personal/internal use. `app/services/claude_vision.py` now picks between two backends automatically:
+
+- **`cli`** (default when `claude` is on PATH) — shells out via `asyncio.create_subprocess_exec("claude", "-p", ..., "--output-format", "json")`. Uses your Claude.ai OAuth login from Claude Code. No key on disk.
+- **`http`** (fallback) — direct call to `api.anthropic.com` using `ANTHROPIC_API_KEY` from `.env` or the `X-Anthropic-Key` request header. Same code path as before.
+
+Override with `CLAUDE_BACKEND=cli|http` in `.env` if you want to pin one. The re-prompt path uses whichever backend served the original call — derived from `_backend(key)` so the existing 6-arg signature of `_do_reprompt` is preserved (no test breakage).
+
+`/api/health.checks.claude` now reports `{backend, cli_available, key_present?, reachable_status?}` so the dashboard can show which path is in use.
+
+### Tradeoffs vs HTTP
+
+- **Pros:** no API key, uses subscription quota instead of API billing, OAuth-equivalent auth via Claude Code.
+- **Cons:** ~150ms subprocess overhead per scan, requires the `claude` CLI installed and logged in, not portable to a server. **Not for distributed products** — Anthropic's Feb 2026 policy reserves Claude.ai login for Claude Code. Fine for internal/personal use.
+
+### Tests added (`tests/test_vision_backend.py` — 10 tests)
+- `_backend()` selector: explicit env wins, per-request key forces HTTP, prefers CLI when available, falls back to HTTP when not.
+- CLI subprocess: parses `{result: ...}` envelope, handles raw text output, raises on non-zero exit.
+- HTTP backend still works when explicitly selected.
+- `cli_available()` boolean helper.
+
+### Test count
+- Round 4: 399 → CLI swap: **409 passing**.
+
+---
+
 ## Round 2 — Performance & UX at scale
 
 Goal: make the dashboard usable when there are 3,000 cards in the inventory (Connor's actual collection size), not just 5. Two parallel agents — Workstream A (backend) and Workstream B (frontend) — built this with strict file ownership boundaries; Workstream C (this section) reconciled and verified.

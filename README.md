@@ -72,11 +72,14 @@ python -m uvicorn app.main:app --host 127.0.0.1 --port 8765
 
 Open <http://127.0.0.1:8765>.
 
-### 3. Connect Anthropic (Claude vision)
+### 3. Connect Claude vision
 
-Click ⚙︎ Settings in the dashboard → paste your key (`sk-ant-…`) → Save.
+Two backends; the app picks automatically:
 
-> **Why a key, not OAuth?** Anthropic restricted OAuth to Claude.ai and Claude Code in their Feb 2026 policy update — third-party apps must use API keys. The key stays in your browser's localStorage; the server only forwards it to api.anthropic.com when needed. (You can also set `ANTHROPIC_API_KEY` in `.env` to share across browsers.)
+- **CLI backend (default if `claude` is on PATH).** Shells out to your local Claude Code CLI, which uses your existing Claude.ai login. No API key anywhere on disk. ~150ms subprocess overhead per scan vs the HTTP path. Best for personal/internal use.
+- **HTTP backend (fallback).** Direct call to `api.anthropic.com` using `ANTHROPIC_API_KEY` from `.env` or the `X-Anthropic-Key` browser-supplied header. Used when Claude Code isn't installed or when `CLAUDE_BACKEND=http` is set explicitly.
+
+You can force a specific backend with `CLAUDE_BACKEND=cli` or `CLAUDE_BACKEND=http` in `.env`. Check which is currently active via `GET /api/health` → `checks.claude.backend`.
 
 ### 4. Connect Google (Drive + Sheets)
 

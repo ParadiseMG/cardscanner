@@ -1,25 +1,35 @@
 """Identify a baseball card from front+back images using Claude vision.
 
-Auth notes
-----------
-Anthropic restricts OAuth to Claude.ai and Claude Code (Feb 2026 policy update).
-End-user OAuth for arbitrary third-party apps is not available, so we accept a
-plain API key. Three places it can come from, in priority order:
+Auth strategy
+-------------
+Two backends, picked automatically:
 
-1. Per-request override (HTTP header `X-Anthropic-Key`) -- handy for the
-   browser-stored key fallback (the user pastes their key into the dashboard
-   and it lives in localStorage; the server never persists it).
-2. ANTHROPIC_API_KEY env var on the server (.env file).
-3. None -- the service raises so the API can return 412 and the UI can prompt.
+1. **CLI backend (default when available).** Shell out to the local `claude`
+   command-line tool, which uses your Claude.ai OAuth login (no API key on
+   disk anywhere). This is the preferred path for personal/internal use:
+   `which claude` decides — if it's on PATH, we use it.
 
-The prompt asks Claude for STRICT JSON only, then we json.loads the response.
-We retry once with a stronger formatting reminder if the first parse fails.
+2. **HTTP backend (fallback).** Direct call to `api.anthropic.com` using
+   `ANTHROPIC_API_KEY` from `.env` or the `X-Anthropic-Key` request header.
+   Used when `claude` is NOT on PATH, or when `CLAUDE_BACKEND=http` is set,
+   or when an explicit per-request key override is supplied (which only
+   makes sense for the HTTP path).
+
+The CLI backend re-uses the user's Claude.ai login; Anthropic's Feb 2026 OAuth
+policy reserves that login for Claude Code itself, so this approach is
+appropriate for personal/internal-only use only — do NOT distribute a product
+that does this.
+
+Both paths produce the same `CardIdentification` dataclass.
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
+import os
 import re
+import shutil
 from dataclasses import dataclass, asdict, field
 from pathlib import Path
 from typing import Optional
@@ -35,6 +45,7 @@ ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_VERSION = "2023-06-01"
 TIMEOUT_SECONDS = 30.0
 RETRY_ATTEMPTS = 3
+CLI_TIMEOUT_SECONDS = 60.0  # subprocess startup adds overhead
 
 # Fields eligible for re-prompt (lowest to highest priority in re-prompt order)
 _REPROMPT_FIELDS = ("parallel", "card_no")
@@ -58,17 +69,16 @@ class CardIdentification:
     grade: Optional[str] = None
     is_autograph: bool = False
     is_relic: bool = False
-    confidence: float = 0.0  # 0..1
+    confidence: float = 0.0
     notes: Optional[str] = None
-    review_flagged: bool = False  # set when confidence < 0.6 or fields missing
-    # A1: enriched fields
+    review_flagged: bool = False
     is_rookie: bool = False
     is_serial_numbered: bool = False
-    serial_print_run: Optional[int] = None      # e.g. 50 from "/50"
+    serial_print_run: Optional[int] = None
     field_confidence: dict[str, float] = field(default_factory=dict)
     condition_signals: dict[str, str] = field(default_factory=dict)
     low_confidence_fields: list[str] = field(default_factory=list)
-    photo_quality: Optional[str] = None         # "good"/"blurry"/"obstructed"/"off_angle"
+    photo_quality: Optional[str] = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -137,129 +147,66 @@ Guidelines:
 """
 
 
+# ---------------------------------------------------------------------------
+# Backend selection
+# ---------------------------------------------------------------------------
+def _backend(api_key_override: Optional[str]) -> str:
+    """Choose 'cli' or 'http'. Override with env var CLAUDE_BACKEND."""
+    explicit = (os.environ.get("CLAUDE_BACKEND") or "").strip().lower()
+    if explicit in {"cli", "http"}:
+        return explicit
+    # If caller is supplying a key explicitly per-request, they want HTTP.
+    if api_key_override:
+        return "http"
+    # Prefer CLI if it's installed and we don't have a key set
+    if shutil.which("claude"):
+        return "cli"
+    return "http"
+
+
+# ---------------------------------------------------------------------------
+# HTTP backend
+# ---------------------------------------------------------------------------
 def _key_or_raise(override: Optional[str]) -> str:
     key = override or settings.anthropic_api_key
     if not key:
         raise RuntimeError(
-            "No Anthropic API key. Provide one via the dashboard (stored in "
-            "localStorage only) or set ANTHROPIC_API_KEY in .env."
+            "No Anthropic API key and `claude` CLI not found on PATH. "
+            "Either install Claude Code (preferred — uses your Claude.ai login), "
+            "set ANTHROPIC_API_KEY in .env, or pass X-Anthropic-Key in the request."
         )
     return key
 
 
 def _b64_image(path: str) -> dict:
-    """Build a Claude vision content block from a local file path."""
     p = Path(path)
     data = base64.standard_b64encode(p.read_bytes()).decode()
     suffix = p.suffix.lower().lstrip(".")
-    if suffix in {"jpg", "jpeg"}:
-        media = "image/jpeg"
-    elif suffix == "png":
-        media = "image/png"
-    elif suffix == "webp":
-        media = "image/webp"
-    elif suffix == "heic":
-        # Anthropic doesn't accept heic; caller should pre-convert.
-        media = "image/heic"
-    else:
-        media = "application/octet-stream"
-    return {
-        "type": "image",
-        "source": {"type": "base64", "media_type": media, "data": data},
-    }
+    media = {
+        "jpg": "image/jpeg", "jpeg": "image/jpeg",
+        "png": "image/png", "webp": "image/webp", "heic": "image/heic",
+    }.get(suffix, "application/octet-stream")
+    return {"type": "image", "source": {"type": "base64", "media_type": media, "data": data}}
 
 
 def _parse_json_block(text: str) -> dict:
     text = text.strip()
-    # tolerate ```json fences if Claude slips
     m = re.search(r"\{.*\}", text, re.DOTALL)
     if not m:
         raise ValueError(f"no JSON object in model response: {text[:200]}")
     return json.loads(m.group(0))
 
 
-def _build_reprompt_content(
+async def _http_call(
     fp: Path,
     bp: Optional[Path],
-    field_name: str,
-    current_value,
-) -> list[dict]:
-    """Build the content list for a focused re-prompt on a single field."""
-    content: list[dict] = [
-        {"type": "text", "text": "Front of card:"},
-        _b64_image(str(fp)),
-    ]
-    if bp:
-        content.append({"type": "text", "text": "Back of card:"})
-        content.append(_b64_image(str(bp)))
-    prompt_text = (
-        f"Look very carefully at this baseball card image.\n\n"
-        f"I need you to identify ONLY the '{field_name}' field.\n"
-        f"Current value I have is: {current_value!r}\n\n"
-        f"Return STRICT JSON ONLY with exactly two keys, no prose, no markdown:\n"
-        f'{{"value": <the correct value or null>, "confidence": <float 0..1>}}'
-    )
-    content.append({"type": "text", "text": prompt_text})
-    return content
-
-
-async def _do_reprompt(
-    fp: Path,
-    bp: Optional[Path],
-    field_name: str,
-    current_value,
+    prompt_text: str,
     key: str,
-    client: httpx.AsyncClient,
-) -> tuple[any, float]:
-    """Issue a focused follow-up call for a single field.
-
-    Returns (new_value, new_confidence). On any error, returns the original
-    value with confidence 0.0 (caller keeps original and logs a warning).
-    """
-    content = _build_reprompt_content(fp, bp, field_name, current_value)
-    payload = {
-        "model": settings.anthropic_model,
-        "max_tokens": 100,
-        "messages": [{"role": "user", "content": content}],
-    }
-    headers = {
-        "x-api-key": key,
-        "anthropic-version": ANTHROPIC_VERSION,
-        "content-type": "application/json",
-    }
-    try:
-        resp = await client.post(ANTHROPIC_URL, json=payload, headers=headers,
-                                 timeout=TIMEOUT_SECONDS)
-        resp.raise_for_status()
-        data = resp.json()
-        text_blocks = [
-            b.get("text", "") for b in data.get("content", [])
-            if b.get("type") == "text"
-        ]
-        raw = "\n".join(text_blocks)
-        parsed = _parse_json_block(raw)
-        new_value = parsed.get("value", current_value)
-        new_conf = float(parsed.get("confidence", 0.0) or 0.0)
-        return new_value, new_conf
-    except Exception as exc:
-        log.warning("vision_reprompt junk response",
-                    extra={"field": field_name, "error": str(exc)})
-        return current_value, 0.0
-
-
-async def identify_card_async(
-    front_path: str,
-    back_path: Optional[str] = None,
-    api_key_override: Optional[str] = None,
     *,
     client: Optional[httpx.AsyncClient] = None,
-) -> CardIdentification:
-    key = _key_or_raise(api_key_override)
-
-    # Normalize HEIC / large / mis-rotated images before sending to Anthropic.
-    fp = normalize_image(Path(front_path))
-    bp = normalize_image(Path(back_path)) if back_path else None
-
+    max_tokens: int = 800,
+) -> str:
+    """Single HTTP call to api.anthropic.com. Returns raw text content."""
     content: list[dict] = [
         {"type": "text", "text": "Front of card:"},
         _b64_image(str(fp)),
@@ -267,11 +214,11 @@ async def identify_card_async(
     if bp:
         content.append({"type": "text", "text": "Back of card:"})
         content.append(_b64_image(str(bp)))
-    content.append({"type": "text", "text": _PROMPT})
+    content.append({"type": "text", "text": prompt_text})
 
     payload = {
         "model": settings.anthropic_model,
-        "max_tokens": 800,
+        "max_tokens": max_tokens,
         "messages": [{"role": "user", "content": content}],
     }
     headers = {
@@ -289,7 +236,6 @@ async def identify_card_async(
                                   timeout=TIMEOUT_SECONDS)
             r.raise_for_status()
             return r
-
         resp = await with_backoff(
             _call, attempts=RETRY_ATTEMPTS, base_delay=1.5,
             on_retry=lambda n, e: log.warning(
@@ -300,11 +246,131 @@ async def identify_card_async(
         if own_client:
             await client.aclose()
 
-    text_blocks = [b.get("text", "") for b in data.get("content", []) if b.get("type") == "text"]
-    raw = "\n".join(text_blocks)
+    return "\n".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text")
+
+
+# ---------------------------------------------------------------------------
+# CLI backend
+# ---------------------------------------------------------------------------
+async def _cli_call(
+    fp: Path,
+    bp: Optional[Path],
+    prompt_text: str,
+) -> str:
+    """Shell out to the local `claude` CLI. Returns raw text content."""
+    # The Claude Code CLI accepts file references in the prompt via @path.
+    # Including the absolute path is the most reliable form.
+    parts = [f"Front of card: @{fp.absolute()}"]
+    if bp:
+        parts.append(f"Back of card: @{bp.absolute()}")
+    parts.append(prompt_text)
+    prompt = "\n\n".join(parts)
+
+    try:
+        proc = await asyncio.wait_for(
+            asyncio.create_subprocess_exec(
+                "claude", "-p", prompt, "--output-format", "json",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            ),
+            timeout=5.0,  # process spawn only
+        )
+    except asyncio.TimeoutError:
+        raise RuntimeError("claude CLI failed to spawn in 5s")
+
+    try:
+        stdout_b, stderr_b = await asyncio.wait_for(
+            proc.communicate(), timeout=CLI_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        proc.kill()
+        raise RuntimeError(f"claude CLI timed out after {CLI_TIMEOUT_SECONDS}s")
+
+    if proc.returncode != 0:
+        msg = (stderr_b.decode("utf-8", errors="replace") or "").strip()
+        raise RuntimeError(f"claude CLI exited {proc.returncode}: {msg[:300]}")
+
+    raw = stdout_b.decode("utf-8", errors="replace").strip()
+    # `--output-format json` returns {"result": "...", ...}; older versions
+    # may return just text. Handle both.
+    try:
+        envelope = json.loads(raw)
+        if isinstance(envelope, dict) and "result" in envelope:
+            return envelope["result"]
+        return raw
+    except json.JSONDecodeError:
+        return raw
+
+
+# ---------------------------------------------------------------------------
+# Re-prompt path (uses whichever backend ran the original call)
+# ---------------------------------------------------------------------------
+def _build_reprompt_text(field_name: str, current_value) -> str:
+    return (
+        f"Look very carefully at this baseball card image.\n\n"
+        f"I need you to identify ONLY the '{field_name}' field.\n"
+        f"Current value I have is: {current_value!r}\n\n"
+        f"Return STRICT JSON ONLY with exactly two keys, no prose, no markdown:\n"
+        f'{{"value": <the correct value or null>, "confidence": <float 0..1>}}'
+    )
+
+
+async def _do_reprompt(
+    fp: Path,
+    bp: Optional[Path],
+    field_name: str,
+    current_value,
+    key: Optional[str],
+    client: Optional[httpx.AsyncClient],
+) -> tuple[any, float]:
+    """Single-field re-prompt. Backend is derived from env so this signature
+    stays stable for tests that mock it as `(fp, bp, field, value, key, client)`.
+    """
+    backend = _backend(key)
+    prompt_text = _build_reprompt_text(field_name, current_value)
+    try:
+        if backend == "cli":
+            raw = await _cli_call(fp, bp, prompt_text)
+        else:
+            raw = await _http_call(fp, bp, prompt_text, key, client=client, max_tokens=100)
+        parsed = _parse_json_block(raw)
+        new_value = parsed.get("value", current_value)
+        new_conf = float(parsed.get("confidence", 0.0) or 0.0)
+        return new_value, new_conf
+    except Exception as exc:
+        log.warning("vision_reprompt junk response",
+                    extra={"field": field_name, "error": str(exc)})
+        return current_value, 0.0
+
+
+# ---------------------------------------------------------------------------
+# Public entrypoint
+# ---------------------------------------------------------------------------
+async def identify_card_async(
+    front_path: str,
+    back_path: Optional[str] = None,
+    api_key_override: Optional[str] = None,
+    *,
+    client: Optional[httpx.AsyncClient] = None,
+) -> CardIdentification:
+    backend = _backend(api_key_override)
+    key: Optional[str] = None
+    if backend == "http":
+        key = _key_or_raise(api_key_override)
+
+    fp = normalize_image(Path(front_path))
+    bp = normalize_image(Path(back_path)) if back_path else None
+
+    log.info("vision call", extra={"backend": backend, "front": fp.name,
+                                    "back": bp.name if bp else None})
+
+    if backend == "cli":
+        raw = await _cli_call(fp, bp, _PROMPT)
+    else:
+        raw = await _http_call(fp, bp, _PROMPT, key, client=client)
+
     parsed = _parse_json_block(raw)
 
-    # Parse field_confidence (tolerate missing/malformed)
     raw_fc = parsed.get("field_confidence") or {}
     field_confidence: dict[str, float] = {}
     if isinstance(raw_fc, dict):
@@ -314,7 +380,6 @@ async def identify_card_async(
             except (TypeError, ValueError):
                 field_confidence[k] = 0.0
 
-    # Parse condition_signals (tolerate missing keys)
     raw_cs = parsed.get("condition_signals") or {}
     condition_signals: dict[str, str] = {}
     if isinstance(raw_cs, dict):
@@ -345,9 +410,7 @@ async def identify_card_async(
         photo_quality=parsed.get("photo_quality"),
     )
 
-    # A2: low-confidence re-prompt for parallel / card_no
-    # Use a fresh short-lived client for re-prompts (the outer client may be
-    # closed by the time we get here if caller passed own_client=True).
+    # Low-confidence re-prompt
     reprompt_count = 0
     reprompt_client_own = False
     reprompt_client: Optional[httpx.AsyncClient] = None
@@ -360,18 +423,16 @@ async def identify_card_async(
             if conf >= _REPROMPT_THRESHOLD:
                 continue
 
-            # Need a live client for re-prompts
-            if reprompt_client is None:
+            if backend == "http" and reprompt_client is None:
                 reprompt_client = httpx.AsyncClient(timeout=TIMEOUT_SECONDS)
                 reprompt_client_own = True
 
             current_value = getattr(cid, field_name, None)
-            with _log.step(log, "vision_reprompt", field=field_name):
+            with _log.step(log, "vision_reprompt", field=field_name, backend=backend):
                 new_value, new_conf = await _do_reprompt(
                     fp, bp, field_name, current_value, key, reprompt_client
                 )
 
-            # Only adopt the new value if the re-prompt succeeded meaningfully
             if new_conf > conf or new_value != current_value:
                 setattr(cid, field_name, new_value)
                 field_confidence[field_name] = new_conf
@@ -380,15 +441,11 @@ async def identify_card_async(
         if reprompt_client_own and reprompt_client is not None:
             await reprompt_client.aclose()
 
-    # Recompute field_confidence on cid (may have been updated by re-prompts)
     cid.field_confidence = field_confidence
-
-    # Compute low_confidence_fields after any re-prompts
     cid.low_confidence_fields = [
         f for f in ("year", "set_brand", "player", "card_no", "parallel", "condition")
         if field_confidence.get(f, 1.0) < _REPROMPT_THRESHOLD
     ]
-
     cid.review_flagged = (
         cid.confidence < 0.6
         or cid.year is None
@@ -405,3 +462,15 @@ def _safe_int(v) -> Optional[int]:
         return int(v)
     except (TypeError, ValueError):
         return None
+
+
+# ---------------------------------------------------------------------------
+# Diagnostics — used by /api/health to report which backend is in use
+# ---------------------------------------------------------------------------
+def active_backend() -> str:
+    """Return 'cli' or 'http' based on current env. No side effects."""
+    return _backend(None)
+
+
+def cli_available() -> bool:
+    return shutil.which("claude") is not None
