@@ -426,21 +426,17 @@ async def run_job_paired(job_id: int, pairs: list, api_key_override: Optional[st
         job.total = len(pipeline_pairs)
         s.add(job)
 
-    sem = asyncio.Semaphore(3)
-
-    async def worker(pair) -> dict:
-        async with sem:
-            res = await _process_one(pair.front, api_key_override,
-                                      back_path=pair.back, job_id=job_id)
-            with session_scope() as s:
-                job = s.get(models.ScanJob, job_id)
-                job.processed += 1
-                if not res.get("ok"):
-                    job.failed += 1
-                s.add(job)
-            return res
-
-    await asyncio.gather(*(worker(p) for p in pipeline_pairs))
+    # Ollama can only handle 1 vision request at a time (VRAM limit),
+    # so process cards sequentially to avoid 500 errors.
+    for pair in pipeline_pairs:
+        res = await _process_one(pair.front, api_key_override,
+                                  back_path=pair.back, job_id=job_id)
+        with session_scope() as s:
+            job = s.get(models.ScanJob, job_id)
+            job.processed += 1
+            if not res.get("ok"):
+                job.failed += 1
+            s.add(job)
 
     with session_scope() as s:
         job = s.get(models.ScanJob, job_id)
