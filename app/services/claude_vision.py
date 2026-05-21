@@ -317,6 +317,51 @@ async def _cli_call(
 # ---------------------------------------------------------------------------
 OLLAMA_TIMEOUT_SECONDS = 120.0  # local models are slower than API
 
+def _stitch_front_back(fp: Path, bp: Path) -> bytes:
+    """Combine front and back images into a single side-by-side JPEG.
+
+    Many Ollama vision models (including llama3.2-vision) only support
+    one image per request.  Stitching lets us send both card sides in
+    a single image with a label above each half.
+    """
+    import cv2
+    import numpy as np
+
+    front = cv2.imread(str(fp))
+    back = cv2.imread(str(bp))
+    if front is None or back is None:
+        raise ValueError(f"Cannot read images for stitching: {fp}, {bp}")
+
+    # Resize both to same height, preserving aspect ratio
+    target_h = max(front.shape[0], back.shape[0])
+    for img_name in ("front", "back"):
+        img = front if img_name == "front" else back
+        h, w = img.shape[:2]
+        if h != target_h:
+            scale = target_h / h
+            new_w = int(w * scale)
+            img = cv2.resize(img, (new_w, target_h))
+            if img_name == "front":
+                front = img
+            else:
+                back = img
+
+    # Add labels above each image
+    label_h = 40
+    labeled_parts = []
+    for label, img in [("FRONT", front), ("BACK", back)]:
+        header = np.zeros((label_h, img.shape[1], 3), dtype=np.uint8)
+        cv2.putText(header, label, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
+        labeled_parts.append(np.vstack([header, img]))
+
+    # Side-by-side with a thin separator
+    sep = np.zeros((labeled_parts[0].shape[0], 4, 3), dtype=np.uint8)
+    composite = np.hstack([labeled_parts[0], sep, labeled_parts[1]])
+
+    _, buf = cv2.imencode(".jpg", composite, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    return buf.tobytes()
+
+
 async def _ollama_call(
     fp: Path,
     bp: Optional[Path],
@@ -324,14 +369,21 @@ async def _ollama_call(
     *,
     max_tokens: int = 800,
 ) -> str:
-    """Call the Ollama /api/chat endpoint with vision. Returns raw text."""
-    images = [base64.standard_b64encode(fp.read_bytes()).decode()]
+    """Call the Ollama /api/chat endpoint with vision. Returns raw text.
+
+    Ollama vision models typically support only one image per request,
+    so when both front and back are provided we stitch them into a
+    single side-by-side composite.
+    """
     if bp:
-        images.append(base64.standard_b64encode(bp.read_bytes()).decode())
+        composite_bytes = _stitch_front_back(fp, bp)
+        images = [base64.standard_b64encode(composite_bytes).decode()]
+    else:
+        images = [base64.standard_b64encode(fp.read_bytes()).decode()]
 
     parts = ["Front of card:"]
     if bp:
-        parts.append("(Second image is the back of the card.)")
+        parts.append("(Left half is FRONT, right half is BACK of the card.)")
     parts.append(prompt_text)
 
     payload = {
