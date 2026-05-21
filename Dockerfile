@@ -26,10 +26,11 @@ RUN mkdir -p /data /data/video-tmp
 ENV CARDSCANNER_PW_HEADLESS=0
 ENV HOST=0.0.0.0
 ENV PORT=8765
+ENV DISPLAY=:99
 
 EXPOSE 8765
 
-# Xvfb gives Chromium a virtual display so it runs in headed mode —
+# Start Xvfb in the background so Chromium runs in headed mode —
 # Akamai's bot detection is much less aggressive against headed browsers.
-CMD ["xvfb-run", "--auto-servernum", "--server-args=-screen 0 1280x1024x24", \
-     "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8765"]
+CMD Xvfb :99 -screen 0 1280x1024x24 -nolisten tcp &>/dev/null & \
+    exec uvicorn app.main:app --host 0.0.0.0 --port 8765
