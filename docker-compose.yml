@@ -8,7 +8,8 @@ services:
     volumes:
       - cardscanner-data:/data
     env_file:
-      - .env
+      - path: .env
+        required: false
     environment:
       - DB_PATH=/data/cardscanner.db
       - GOOGLE_TOKEN_PATH=/data/google_token.json
