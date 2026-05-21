@@ -15,7 +15,7 @@ services:
       - GOOGLE_TOKEN_PATH=/data/google_token.json
       - EBAY_TOKEN_PATH=/data/ebay_token.json
       - GOOGLE_OAUTH_CLIENT_SECRETS=/data/google_client_secret.json
-      - CARDSCANNER_PW_HEADLESS=1
+      - CARDSCANNER_PW_HEADLESS=0
       - CARDSCANNER_PW_PROFILE=/data/playwright-profile
       - HOST=0.0.0.0
       - VISION_BACKEND=${VISION_BACKEND:-ollama}
