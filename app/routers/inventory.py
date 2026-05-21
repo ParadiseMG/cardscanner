@@ -536,6 +536,87 @@ async def reidentify_card(
     return result.model_dump()
 
 
+@router.post("/inventory/{card_id}/reprice")
+async def reprice_card(card_id: int) -> dict:
+    """Retry comp lookup for a card that was saved without pricing.
+
+    Useful when the original comp fetch failed (captcha, timeout, etc.)
+    but the card was still saved with its identification data.
+    """
+    from app.services import comp_lookup as _comp
+
+    with Session(get_engine()) as s:
+        card = s.get(models.Card, card_id)
+        if not card:
+            raise HTTPException(404, "card not found")
+        player = card.player
+        year = card.year
+        set_brand = card.set_brand
+        card_no = card.card_no
+        parallel = card.parallel
+
+    with _log.step(log, "reprice", card_id=card_id, player=player):
+        comp = await _comp.fetch_comps(year, set_brand, player, card_no, parallel)
+
+    with session_scope() as s:
+        card = s.get(models.Card, card_id)
+        if not card:
+            raise HTTPException(404, "card not found")
+        card.comp_median = comp.median
+        card.comp_low = comp.low
+        card.comp_high = comp.high
+        card.comp_count = comp.count
+        card.comp_url = comp.url
+        card.comp_fetched_at = datetime.utcnow()
+        card.comp_confidence = comp.confidence
+        card.comp_median_weighted = comp.median_recency_weighted
+        card.comp_suspicious_bulk = comp.suspicious_bulk
+        card.comp_suspicious_reason = comp.suspicious_reason or None
+        effective_value = comp.median_recency_weighted or comp.median
+        card.est_value_raw = effective_value
+        card.consider_grading = (effective_value or 0) >= 30 and not card.is_graded
+        # Clean up the "pricing pending" note if present
+        if card.notes and "Pricing pending" in card.notes:
+            lines = [l for l in card.notes.split("\n")
+                     if "Pricing pending" not in l]
+            card.notes = "\n".join(lines).strip() or None
+        card.updated_at = datetime.utcnow()
+        s.add(card)
+        s.flush()
+        name = _location_names_for(s, [card]).get(card.storage_location_id)
+        result = CardOut.from_db(card, name)
+
+    log.info("reprice complete", extra={"card_id": card_id, "value": effective_value})
+    return result.model_dump()
+
+
+@router.post("/inventory/reprice-all")
+async def reprice_all_unpriced() -> dict:
+    """Retry comp lookup for all cards missing pricing data."""
+    from app.services import comp_lookup as _comp
+
+    with Session(get_engine()) as s:
+        unpriced = s.exec(
+            select(models.Card).where(models.Card.comp_fetched_at.is_(None))
+        ).all()
+        card_ids = [c.id for c in unpriced]
+
+    if not card_ids:
+        return {"repriced": 0, "failed": 0, "message": "All cards already have pricing"}
+
+    repriced = 0
+    failed = 0
+    for cid in card_ids:
+        try:
+            await reprice_card(cid)
+            repriced += 1
+        except Exception as e:
+            log.warning("reprice failed", extra={"card_id": cid, "error": str(e)})
+            failed += 1
+
+    return {"repriced": repriced, "failed": failed, "total": len(card_ids)}
+
+
 # ---------------------------------------------------------------------------
 # POST /api/inventory/retag-sports
 # ---------------------------------------------------------------------------

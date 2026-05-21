@@ -94,10 +94,17 @@ async def _process_one(
                     back_path=str(back_path) if back_path else None,
                     api_key_override=api_key_override, client=client,
                 )
-        with _log.step(log, "comp_lookup", player=ident.player, year=ident.year):
-            comp = await comp_lookup.fetch_comps(
-                ident.year, ident.set_brand, ident.player, ident.card_no, ident.parallel,
-            )
+
+        # Comp lookup is best-effort — save the card even if pricing fails
+        comp = None
+        try:
+            with _log.step(log, "comp_lookup", player=ident.player, year=ident.year):
+                comp = await comp_lookup.fetch_comps(
+                    ident.year, ident.set_brand, ident.player, ident.card_no, ident.parallel,
+                )
+        except Exception as comp_err:
+            log.warning("comp lookup failed, saving card without pricing",
+                        extra={"player": ident.player, "error": str(comp_err)})
 
         # Reconcile sport: trust set_brand keywords over Claude's default-Baseball bias.
         from app.utils.sport_inference import reconcile_sport
@@ -113,12 +120,16 @@ async def _process_one(
                 flag_note = f"Auto-flagged: low confidence on {ident.low_confidence_fields}"
                 card_notes = f"{card_notes}\n{flag_note}" if card_notes else flag_note
                 review_flagged = True
-            # B3: append bulk-lot warning to notes
-            if comp.suspicious_bulk:
+            if comp and comp.suspicious_bulk:
                 bulk_note = "⚠️ Comp prices look like a bulk-lot fingerprint — verify before pricing"
                 card_notes = f"{card_notes}\n{bulk_note}" if card_notes else bulk_note
-            # B3: effective value prefers recency-weighted median
-            effective_value = comp.median_recency_weighted or comp.median
+            effective_value = None
+            if comp:
+                effective_value = comp.median_recency_weighted or comp.median
+            if comp is None:
+                price_note = "⏳ Pricing pending — comp lookup failed, retry from inventory"
+                card_notes = f"{card_notes}\n{price_note}" if card_notes else price_note
+                review_flagged = True
 
             card = models.Card(
                 year=ident.year, set_brand=ident.set_brand, player=ident.player,
@@ -132,9 +143,12 @@ async def _process_one(
                 back_image=back_path.name if back_path else None,
                 front_hash=front_hash, back_hash=back_hash,
                 drive_front_id=drive_front_id, drive_back_id=drive_back_id,
-                comp_median=comp.median, comp_low=comp.low, comp_high=comp.high,
-                comp_count=comp.count, comp_url=comp.url,
-                comp_fetched_at=datetime.utcnow(),
+                comp_median=comp.median if comp else None,
+                comp_low=comp.low if comp else None,
+                comp_high=comp.high if comp else None,
+                comp_count=comp.count if comp else 0,
+                comp_url=comp.url if comp else None,
+                comp_fetched_at=datetime.utcnow() if comp else None,
                 est_value_raw=effective_value,
                 notes=card_notes,
                 consider_grading=(effective_value or 0) >= 30 and not ident.is_graded,
@@ -152,10 +166,10 @@ async def _process_one(
                     if ident.condition_signals else None
                 ),
                 # B3: comp intelligence fields
-                comp_confidence=comp.confidence,
-                comp_median_weighted=comp.median_recency_weighted,
-                comp_suspicious_bulk=comp.suspicious_bulk,
-                comp_suspicious_reason=comp.suspicious_reason or None,
+                comp_confidence=comp.confidence if comp else "none",
+                comp_median_weighted=comp.median_recency_weighted if comp else None,
+                comp_suspicious_bulk=comp.suspicious_bulk if comp else False,
+                comp_suspicious_reason=(comp.suspicious_reason or None) if comp else None,
                 # m11: inherit storage from the parent sync job
                 storage_location_id=job_storage_location_id,
                 storage_position=job_storage_position,
@@ -192,7 +206,8 @@ async def _process_one(
 
         log.info("card processed", extra={
             "card_id": snapshot["card_id"], "value": snapshot["value"],
-            "hit": snapshot["hit"], "duration_ms": int((datetime.utcnow()-started).total_seconds()*1000),
+            "hit": snapshot["hit"], "priced": comp is not None,
+            "duration_ms": int((datetime.utcnow()-started).total_seconds()*1000),
         })
         return snapshot
     except Exception as e:
