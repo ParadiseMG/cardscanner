@@ -53,8 +53,8 @@ class Settings(BaseSettings):
     # Video scanning
     video_retake_photo_threshold: float = 10.0  # suggest retaking photos above this value
     video_max_upload_mb: int = 500
-    video_motion_threshold: float = 8.0  # per-pixel diff threshold for "still" detection
-    video_min_still_seconds: float = 0.25  # minimum pause duration to count as a still window
+    video_motion_threshold: float = 6.0  # per-pixel diff threshold for "still" detection
+    video_min_still_seconds: float = 0.4  # minimum pause duration to count as a still window
     video_min_sharpness: float = 10.0  # skip frames below this Laplacian variance
 
     # Captcha notification (ntfy.sh push notification when captcha detected)

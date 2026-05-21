@@ -198,6 +198,20 @@ function cardscanner() {
       this.loadAchievements();
       // Keyboard handler (B4)
       document.addEventListener('keydown', (e) => this.keyboardHandler(e));
+      // Resume tracking if there's an active job (survives page reload)
+      await this.resumeActiveJob();
+    },
+
+    async resumeActiveJob() {
+      try {
+        const jobs = await fetch('/api/scans/jobs').then(r => r.json());
+        const active = jobs.find(j => ['queued', 'processing'].includes(j.status));
+        if (active) {
+          this.job = active;
+          if (this.jobPoll) clearInterval(this.jobPoll);
+          this.jobPoll = setInterval(() => this.pollJob(), 1500);
+        }
+      } catch (e) {}
     },
 
     async refreshAll() {
