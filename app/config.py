@@ -45,6 +45,21 @@ class Settings(BaseSettings):
     ebay_merchant_location_key: str = "cardscanner_default"
     ebay_token_path: str = str(DATA_DIR / "ebay_token.json")
 
+    # Ollama (local vision model on home server)
+    vision_backend: str = "auto"  # "auto" | "ollama" | "http" | "cli"
+    ollama_base_url: str = "http://100.71.106.53:11434"
+    ollama_vision_model: str = "llama3.2-vision:11b"
+
+    # Captcha notification (ntfy.sh push notification when captcha detected)
+    ntfy_topic: str = ""  # e.g. "cardscanner-connor" — leave blank to disable
+    ntfy_server: str = "https://ntfy.sh"
+
+    # Pricing strategy (applies when sourcing prices from eBay Browse API
+    # active listings). "Undercut the lowest active asking by N%" — typical
+    # range is 5-7. Lower = sells faster but leaves money on the table; higher
+    # = better margin but slower turnover.
+    pricing_undercut_pct: float = 6.0
+
     @property
     def ebay_api_base(self) -> str:
         return (

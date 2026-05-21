@@ -26,6 +26,8 @@ from bs4 import BeautifulSoup
 
 from app.utils import logger as _log
 from app.utils.retry import with_backoff
+from app.services import browser_fetch, ebay_browse
+from app.config import settings as _settings
 
 log = _log.get(__name__)
 
@@ -48,15 +50,47 @@ class CompResult:
     confidence: str = "low"  # high / medium / low
 
 
-_USER_AGENT = (
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_5) AppleWebKit/605.1.15 "
-    "(KHTML, like Gecko) Version/17.0 Safari/605.1.15 CardScanner/0.1"
-)
-_HEADERS = {
-    "User-Agent": _USER_AGENT,
-    "Accept-Language": "en-US,en;q=0.9",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-}
+import random as _random
+
+# Rotate through realistic browser User-Agents — eBay fingerprints by UA, so
+# a single static UA gets banned quickly. Keep these current; outdated UAs
+# trigger the bot detector too.
+_USER_AGENTS = [
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/605.1.15 "
+    "(KHTML, like Gecko) Version/17.5 Safari/605.1.15",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4_1) AppleWebKit/605.1.15 "
+    "(KHTML, like Gecko) Version/17.4.1 Safari/605.1.15",
+]
+
+
+def _build_headers() -> dict:
+    """Build headers that look like a real browser navigating from the eBay home page."""
+    return {
+        "User-Agent": _random.choice(_USER_AGENTS),
+        "Accept": ("text/html,application/xhtml+xml,application/xml;q=0.9,"
+                   "image/avif,image/webp,*/*;q=0.8"),
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+        "Referer": "https://www.ebay.com/",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "same-origin",
+        "Sec-Fetch-User": "?1",
+        "Upgrade-Insecure-Requests": "1",
+        "DNT": "1",
+        "Connection": "keep-alive",
+    }
+
+
+# Backwards compat — anything that imports _HEADERS still works
+_HEADERS = _build_headers()
+_USER_AGENT = _USER_AGENTS[0]
 
 _PRICE_RE = re.compile(r"\$([0-9][0-9,]*\.?\d*)")
 _OK_CACHE: dict[str, tuple[float, CompResult]] = {}
@@ -65,11 +99,15 @@ _OK_TTL = 60 * 60
 _FAIL_TTL = 60 * 5
 
 # Try multiple selector patterns; eBay rotates classnames sometimes.
+# `.s-card__price` is the 2025+ layout; the others handle older rollouts
+# still served to some sessions.
 _PRICE_SELECTORS = [
+    "li.s-card .s-card__price",
+    ".s-card__price",
     "li.s-item .s-item__price",
     "li[data-listing-id] span.s-item__price",
     "div.s-item__details span.s-item__price",
-    "span.POSITIVE",  # sometimes used on the new sold-listings template
+    "span.POSITIVE",
 ]
 
 
@@ -220,12 +258,49 @@ def recency_weighted(
     return round(statistics.median(weighted), 2)
 
 
+def _prices_from_text_sweep(soup: BeautifulSoup) -> list[float]:
+    """DOM-agnostic last resort: pull every $N.NN from the results area and
+    drop obvious non-prices (nav links, fees disclaimers, $0/$10000+ junk).
+
+    Survives eBay's CSS reshuffles because it doesn't depend on classes —
+    just on the fact that prices are visible text in dollar-sign format.
+    """
+    # Limit to the search results region if we can find it; otherwise scan the body
+    container = (soup.select_one("ul.srp-results")
+                 or soup.select_one("[id*='srp']")
+                 or soup.select_one("main")
+                 or soup.body)
+    if container is None:
+        return []
+    text = container.get_text(" ", strip=True)
+    # Match $N.NN, $NNN, $1,234.56, etc.
+    raw = re.findall(r"\$([0-9][0-9,]{0,7}(?:\.\d{1,2})?)", text)
+    out: list[float] = []
+    for s in raw:
+        try:
+            v = float(s.replace(",", ""))
+        except ValueError:
+            continue
+        # Filter junk: too cheap (bid increments / shipping) and too expensive (full sets)
+        if 0.50 <= v <= 10000:
+            out.append(v)
+    return out
+
+
 def _parse_prices(html: str) -> tuple[list[float], str, list[tuple[float, Optional[datetime]]]]:
     soup = BeautifulSoup(html, "html.parser")
     prices, source = _prices_from_selectors(soup)
     if not prices:
         prices = _prices_from_jsonld(soup)
         source = "jsonld" if prices else "none"
+    if not prices:
+        # DOM-agnostic last resort: text-sweep $ amounts from the results area.
+        # Survives eBay's CSS reshuffles since it doesn't depend on classes.
+        prices = _prices_from_text_sweep(soup)
+        if prices:
+            source = "text_sweep"
+            log.info("comp_lookup: text-sweep recovered prices",
+                     extra={"count": len(prices)})
     prices = filter_outliers(prices)
     # Try to parse dates alongside prices.
     samples = _parse_samples(soup, prices, source)
@@ -313,22 +388,69 @@ async def fetch_comps(
     if failed and now - failed[0] < _FAIL_TTL:
         return failed[1]
 
-    own = client is None
-    if own:
-        client = httpx.AsyncClient(timeout=20.0, headers=_HEADERS, follow_redirects=True)
-    try:
-        async def _fetch() -> httpx.Response:
-            r = await client.get(url, timeout=20.0)
-            r.raise_for_status()
-            return r
-        resp = await with_backoff(_fetch, attempts=2, base_delay=0.5)
-        prices, source, samples = _parse_prices(resp.text)
-    except httpx.HTTPError as e:
-        log.warning("comp fetch failed", extra={"url": url, "error": type(e).__name__})
-        prices, source, samples = [], "error", []
-    finally:
+    # ── PATH 1: eBay Browse API (active listings) ────────────────────────
+    # Free, no scraping, no 403 risk. Returns "what's currently for sale".
+    # We pivot: instead of "median sold price", we return "lowest current
+    # active price, undercut by configured pct" as the suggested listing
+    # price. This is how flippers actually price.
+    if ebay_browse.is_configured():
+        with _log.step(log, "comp_fetch_browse_api", query=query):
+            active_prices = await ebay_browse.fetch_active_listings(query)
+        if active_prices:
+            res = CompResult(query=query, url=url,
+                             prices=sorted(active_prices),
+                             count=len(active_prices),
+                             source="browse_api_active",
+                             samples=[(p, None) for p in active_prices])
+            res.median = round(statistics.median(active_prices), 2)
+            res.low = round(min(active_prices), 2)
+            res.high = round(max(active_prices), 2)
+            # Suggested price = floor × (1 - undercut%); stored in
+            # median_recency_weighted slot so downstream pricing UI uses it
+            res.median_recency_weighted = ebay_browse.suggest_price(
+                active_prices, undercut_pct=_settings.pricing_undercut_pct
+            )
+            res.suspicious_bulk, res.suspicious_reason = detect_suspicious(active_prices)
+            n = len(active_prices)
+            if n >= 10 and not res.suspicious_bulk:
+                res.confidence = "high"
+            elif n >= 5:
+                res.confidence = "medium"
+            else:
+                res.confidence = "low"
+            _OK_CACHE[url] = (now, res)
+            return res
+
+    # ── PATH 2: HTML scrape via Playwright (real browser, bypasses 403) ──
+    html = None
+    if browser_fetch.is_available():
+        with _log.step(log, "comp_fetch_playwright", url=url):
+            html = await browser_fetch.fetch_html(url)
+    if not html:
+        own = client is None
         if own:
-            await client.aclose()
+            client = httpx.AsyncClient(timeout=20.0,
+                                        headers=_build_headers(),
+                                        follow_redirects=True)
+        try:
+            async def _fetch() -> httpx.Response:
+                r = await client.get(url, timeout=20.0)
+                r.raise_for_status()
+                return r
+            resp = await with_backoff(_fetch, attempts=2, base_delay=0.5)
+            html = resp.text
+        except httpx.HTTPError as e:
+            log.warning("comp fetch failed (httpx)",
+                        extra={"url": url, "error": type(e).__name__})
+            html = None
+        finally:
+            if own:
+                await client.aclose()
+
+    if html:
+        prices, source, samples = _parse_prices(html)
+    else:
+        prices, source, samples = [], "error", []
 
     res = CompResult(query=query, url=url, prices=prices, count=len(prices), source=source,
                      samples=samples)

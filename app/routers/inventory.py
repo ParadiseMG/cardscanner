@@ -29,6 +29,20 @@ def _card_value(c: models.Card) -> float:
     return 0.0
 
 
+def _location_names_for(s: Session, cards: list) -> dict:
+    """Batch-load StorageLocation.name for any cards that have a location_id.
+
+    Returns {location_id: name}. Avoids N+1 by issuing a single IN query.
+    """
+    ids = {c.storage_location_id for c in cards if c.storage_location_id}
+    if not ids:
+        return {}
+    rows = s.exec(
+        select(models.StorageLocation).where(models.StorageLocation.id.in_(ids))
+    ).all()
+    return {loc.id: loc.name for loc in rows}
+
+
 # ---------------------------------------------------------------------------
 # Output schema
 # ---------------------------------------------------------------------------
@@ -41,6 +55,7 @@ class CardOut(BaseModel):
     player: Optional[str]
     card_no: Optional[str]
     parallel: Optional[str]
+    sport: Optional[str]
     condition: Optional[str]
     is_graded: bool
     grade: Optional[str]
@@ -70,12 +85,18 @@ class CardOut(BaseModel):
     sold_at: Optional[str] = None
     sale_channel: Optional[str] = None
     acquisition_cost: Optional[float] = None
+    # Storage location (m10)
+    storage_location_id: Optional[int] = None
+    storage_location_name: Optional[str] = None
+    storage_position: Optional[str] = None
 
     @classmethod
-    def from_db(cls, c: models.Card) -> "CardOut":
+    def from_db(cls, c: models.Card,
+                location_name: Optional[str] = None) -> "CardOut":
         return cls(
             id=c.id, title=c.display_title(), year=c.year, set_brand=c.set_brand,
             player=c.player, card_no=c.card_no, parallel=c.parallel,
+            sport=c.sport,
             condition=c.condition, is_graded=c.is_graded, grade=c.grade,
             is_autograph=c.is_autograph, is_relic=c.is_relic,
             est_value_raw=c.est_value_raw, comp_median=c.comp_median,
@@ -91,6 +112,10 @@ class CardOut(BaseModel):
             sold_at=c.sold_at.isoformat() if c.sold_at else None,
             sale_channel=c.sale_channel,
             acquisition_cost=c.acquisition_cost,
+            # Storage (m10)
+            storage_location_id=c.storage_location_id,
+            storage_location_name=location_name,
+            storage_position=c.storage_position,
         )
 
 
@@ -111,6 +136,11 @@ class CardPatch(BaseModel):
     notes: Optional[str] = None
     review_flagged: Optional[bool] = None
     needs_photo_verification: Optional[bool] = None
+    # Auto-tag override
+    sport: Optional[str] = None
+    # Storage (m10) — pass null to clear
+    storage_location_id: Optional[int] = None
+    storage_position: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -138,6 +168,10 @@ def list_cards(
     include_deleted: bool = False,
     # B7: server-side comp_confidence filter
     comp_confidence: Optional[str] = Query(default=None, pattern="^(high|medium|low)$"),
+    # m10: storage location filter. Use storage_location_id=0 to filter "unassigned".
+    storage_location_id: Optional[int] = None,
+    # Sport auto-tag filter (Baseball / Football / Basketball / Hockey / Soccer / Other).
+    sport: List[str] = Query(default=[]),
 ) -> dict:
     with Session(get_engine()) as s:
         stmt = select(models.Card)
@@ -169,6 +203,19 @@ def list_cards(
         # B7: comp confidence filter (server-side)
         if comp_confidence is not None:
             stmt = stmt.where(models.Card.comp_confidence == comp_confidence)
+
+        # m10: storage location filter. 0 = "unassigned" (NULL).
+        if storage_location_id is not None:
+            if storage_location_id == 0:
+                stmt = stmt.where(models.Card.storage_location_id.is_(None))
+            else:
+                stmt = stmt.where(
+                    models.Card.storage_location_id == storage_location_id
+                )
+
+        # Sport auto-tag filter (multi-value).
+        if sport:
+            stmt = stmt.where(models.Card.sport.in_(sport))
 
         # Fetch all matching rows (text search and era filter need Python-side eval)
         rows = s.exec(stmt).all()
@@ -207,9 +254,13 @@ def list_cards(
 
         total = len(rows)
         page = rows[offset: offset + limit]
+        names = _location_names_for(s, page)
         return {
             "total": total,
-            "items": [CardOut.from_db(c).model_dump() for c in page],
+            "items": [
+                CardOut.from_db(c, names.get(c.storage_location_id)).model_dump()
+                for c in page
+            ],
         }
 
 
@@ -222,6 +273,7 @@ class FacetsResponse(BaseModel):
     ebay_status: dict
     value_buckets: dict
     tags: dict
+    sports: dict
 
 
 @router.get("/inventory/facets", response_model=FacetsResponse)
@@ -241,11 +293,16 @@ def get_facets() -> FacetsResponse:
         tags: dict[str, int] = {
             "autograph": 0, "relic": 0, "graded": 0, "hit": 0
         }
+        sports: dict[str, int] = {}
 
         for c in rows:
             # Era
             e = c.era()
             eras[e] = eras.get(e, 0) + 1
+
+            # Sport
+            sp = c.sport or "Unknown"
+            sports[sp] = sports.get(sp, 0) + 1
 
             # eBay status
             es = c.ebay_status or "not_listed"
@@ -279,6 +336,7 @@ def get_facets() -> FacetsResponse:
         ebay_status=ebay_status_counts,
         value_buckets=value_buckets,
         tags=tags,
+        sports=sports,
     )
 
 
@@ -292,7 +350,11 @@ def recent(n: int = 10) -> list[dict]:
         rows = s.exec(
             select(models.Card).order_by(models.Card.id.desc()).limit(n)
         ).all()
-        return [CardOut.from_db(c).model_dump() for c in rows]
+        names = _location_names_for(s, rows)
+        return [
+            CardOut.from_db(c, names.get(c.storage_location_id)).model_dump()
+            for c in rows
+        ]
 
 
 @router.get("/inventory/{card_id}")
@@ -301,7 +363,8 @@ def get_card(card_id: int) -> dict:
         c = s.get(models.Card, card_id)
         if not c:
             raise HTTPException(404, "card not found")
-        return CardOut.from_db(c).model_dump()
+        name = _location_names_for(s, [c]).get(c.storage_location_id)
+        return CardOut.from_db(c, name).model_dump()
 
 
 @router.patch("/inventory/{card_id}")
@@ -310,11 +373,66 @@ def patch_card(card_id: int, patch: CardPatch) -> dict:
         c = s.get(models.Card, card_id)
         if not c:
             raise HTTPException(404, "card not found")
-        for k, v in patch.model_dump(exclude_unset=True).items():
+        data = patch.model_dump(exclude_unset=True)
+        # Validate any storage_location_id reference up front.
+        if "storage_location_id" in data and data["storage_location_id"] is not None:
+            loc = s.get(models.StorageLocation, data["storage_location_id"])
+            if not loc:
+                raise HTTPException(400, "storage_location_id does not exist")
+        for k, v in data.items():
             setattr(c, k, v)
         c.updated_at = datetime.utcnow()
         s.add(c); s.commit(); s.refresh(c)
-        return CardOut.from_db(c).model_dump()
+        name = _location_names_for(s, [c]).get(c.storage_location_id)
+        return CardOut.from_db(c, name).model_dump()
+
+
+@router.post("/inventory/dedupe")
+def dedupe_inventory() -> dict:
+    """Soft-delete duplicate Card rows.
+
+    Two passes:
+    1. Group by front_hash (exact-image dedupe).
+    2. Group by (year, set_brand, player, card_no) for cards without a hash
+       (catches earlier-created cards from before hashing was wired in).
+
+    Keeps the lowest id of each duplicate group; sets others to status='Deleted'.
+    """
+    from collections import defaultdict
+    with Session(get_engine()) as s:
+        deleted_hash = 0
+        hash_groups = defaultdict(list)
+        for c in s.exec(select(models.Card).where(models.Card.front_hash != None,
+                                                   models.Card.status != "Deleted")).all():
+            hash_groups[c.front_hash].append(c)
+        for h, cards in hash_groups.items():
+            if len(cards) <= 1: continue
+            cards.sort(key=lambda c: c.id)
+            for dup in cards[1:]:
+                dup.status = "Deleted"
+                s.add(dup); deleted_hash += 1
+
+        deleted_meta = 0
+        meta_groups = defaultdict(list)
+        for c in s.exec(select(models.Card).where(models.Card.status != "Deleted")).all():
+            if c.year and c.set_brand and c.player:
+                key = (c.year, (c.set_brand or "").lower(), (c.player or "").lower(), (c.card_no or "").lower())
+                meta_groups[key].append(c)
+        for key, cards in meta_groups.items():
+            if len(cards) <= 1: continue
+            cards.sort(key=lambda c: c.id)
+            for dup in cards[1:]:
+                dup.status = "Deleted"
+                s.add(dup); deleted_meta += 1
+
+        s.commit()
+        return {
+            "deleted": deleted_hash + deleted_meta,
+            "deleted_by_hash": deleted_hash,
+            "deleted_by_metadata": deleted_meta,
+            "hash_groups": sum(1 for cs in hash_groups.values() if len(cs) > 1),
+            "meta_groups": sum(1 for cs in meta_groups.values() if len(cs) > 1),
+        }
 
 
 @router.delete("/inventory/{card_id}")
@@ -411,7 +529,49 @@ async def reidentify_card(
         s.add(card)
         # refresh inside scope
         s.flush()
-        result = CardOut.from_db(card)
+        name = _location_names_for(s, [card]).get(card.storage_location_id)
+        result = CardOut.from_db(card, name)
 
     log.info("reidentify complete", extra={"card_id": card_id})
     return result.model_dump()
+
+
+# ---------------------------------------------------------------------------
+# POST /api/inventory/retag-sports
+# ---------------------------------------------------------------------------
+# Run the sport-inference heuristic over every Card row and update `sport`.
+# Used once to fix cards mis-tagged "Baseball" by the old default-biased prompt;
+# also safe to re-run after the heuristic learns a new brand pattern.
+
+@router.post("/inventory/retag-sports")
+def retag_sports(force: bool = Query(False)) -> dict:
+    """Re-derive `Card.sport` from set_brand for every row.
+
+    By default, treats the *current* stored sport as one input — useful when
+    Claude correctly identified the sport during scan but no brand keyword
+    confirms it. With `?force=true`, ignores the current value entirely so
+    any prior bad tags get cleaned up; cards whose brand is silent fall back
+    to Baseball (the most common case).
+
+    Returns counts of changes per sport. Idempotent.
+    """
+    from app.utils.sport_inference import reconcile_sport
+    updated = 0
+    breakdown: dict[str, int] = {}
+    with session_scope() as s:
+        cards = s.exec(select(models.Card)).all()
+        for c in cards:
+            input_sport = None if force else c.sport
+            new_sport = reconcile_sport(input_sport, c.set_brand, c.player, c.team)
+            # `Other` is the conservative reconcile fallback; for retag we'd
+            # rather keep Baseball as the default so the typical baseball
+            # collection doesn't end up half-tagged "Other".
+            if force and new_sport == "Other":
+                new_sport = "Baseball"
+            if new_sport != c.sport:
+                breakdown[new_sport] = breakdown.get(new_sport, 0) + 1
+                c.sport = new_sport
+                c.updated_at = datetime.utcnow()
+                s.add(c)
+                updated += 1
+    return {"updated": updated, "by_sport": breakdown, "total": len(cards)}

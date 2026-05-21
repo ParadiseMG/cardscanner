@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>CardScanner — Danu</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ctext y='14' font-size='14'%3E%F0%9F%93%87%3C/text%3E%3C/svg%3E">
   <script src="https://cdn.tailwindcss.com"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.js"></script>
@@ -127,7 +128,7 @@
           </p>
         </div>
         <div class="flex flex-col items-end gap-2">
-          <button @click="syncDrive()" :disabled="!drive.connected || job"
+          <button @click="openSyncPrompt()" :disabled="!drive.connected || job"
                   class="px-5 py-2.5 rounded-lg bg-fuchsia-600 hover:bg-fuchsia-500 disabled:opacity-50 disabled:cursor-not-allowed font-medium focus:outline-none focus:ring-2 focus:ring-fuchsia-400">
             Sync new cards →
           </button>
@@ -210,6 +211,33 @@
         </button>
       </div>
     </div>
+
+    <!-- recent failures (R5: surfaces WHY a scan errored) -->
+    <template x-if="recentFailures.length">
+      <div class="rounded-xl bg-rose-950/30 border border-rose-900/40 p-4 mb-6">
+        <div class="flex justify-between items-center mb-3">
+          <h3 class="font-semibold text-rose-200">⚠ Recent failures (<span x-text="recentFailures.length"></span>)</h3>
+          <div class="flex gap-2">
+            <button @click="retryFailedDrive()"
+                    class="text-xs px-3 py-1.5 rounded bg-fuchsia-600 hover:bg-fuchsia-500 text-white focus:outline-none focus:ring-1 focus:ring-fuchsia-300">
+              Retry failed in Drive
+            </button>
+            <button @click="loadRecentFailures()" class="text-xs text-slate-400 hover:text-slate-200">refresh</button>
+          </div>
+        </div>
+        <div class="space-y-2 text-xs">
+          <template x-for="f in recentFailures.slice(0, 8)" :key="f.id">
+            <div class="rounded bg-slate-900/60 border border-slate-800 p-2">
+              <div class="flex justify-between items-start gap-2">
+                <span class="font-mono text-slate-300 truncate" x-text="f.file_name"></span>
+                <span class="text-rose-400 shrink-0" x-text="f.error_class || 'Error'"></span>
+              </div>
+              <div class="text-slate-400 mt-1 break-words" x-text="f.error"></div>
+            </div>
+          </template>
+        </div>
+      </div>
+    </template>
 
     <!-- charts -->
     <div class="grid md:grid-cols-2 gap-4 mb-6">
@@ -328,6 +356,19 @@
           </select>
         </div>
 
+        <!-- m10: Storage location filter -->
+        <div>
+          <label class="block text-xs text-slate-400 mb-1">Storage</label>
+          <select x-model="storageFilterId" @change="applyFilters()"
+                  class="w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700 text-xs focus:outline-none focus:ring-2 focus:ring-fuchsia-500">
+            <option value="">Any</option>
+            <option value="0">— unassigned —</option>
+            <template x-for="loc in storageLocations" :key="loc.id">
+              <option :value="String(loc.id)" x-text="loc.name + ' (' + loc.card_count + ')'"></option>
+            </template>
+          </select>
+        </div>
+
         <!-- Value range -->
         <div>
           <label class="block text-xs text-slate-400 mb-1">Value range ($)</label>
@@ -343,6 +384,22 @@
               <button @click="filterMinValue=(bucket.split('-')[0]||''); filterMaxValue=(bucket.includes('+')?'':bucket.split('-')[1]||''); applyFilters()"
                       class="px-1.5 py-0.5 rounded text-[10px] bg-slate-800 hover:bg-slate-700 text-slate-400 focus:outline-none focus:ring-1 focus:ring-fuchsia-500"
                       x-text="'$'+bucket+' ('+count+')'"></button>
+            </template>
+          </div>
+        </div>
+
+        <!-- Sport chips from facets (auto-tagged from set_brand heuristic) -->
+        <div x-show="Object.keys(facets.sports||{}).length">
+          <label class="block text-xs text-slate-400 mb-1">Sport</label>
+          <div class="space-y-1">
+            <template x-for="[sp, count] in Object.entries(facets.sports||{})" :key="sp">
+              <button @click="toggleSportFilter(sp)"
+                      :class="filterSport.includes(sp) ? 'bg-fuchsia-600/40 text-fuchsia-200 border-fuchsia-500/40' : 'bg-slate-800 text-slate-400 border-slate-700 hover:bg-slate-700'"
+                      class="w-full text-left px-2 py-1 rounded text-[10px] border focus:outline-none focus:ring-1 focus:ring-fuchsia-500 truncate"
+                      :title="sp">
+                <span x-text="sp"></span>
+                <span class="float-right text-slate-500" x-text="count"></span>
+              </button>
             </template>
           </div>
         </div>
@@ -459,6 +516,38 @@
             Recompute comps
           </button>
 
+          <!-- m10: Move to storage location -->
+          <div class="relative" x-data="{open:false}">
+            <button @click="open=!open; if(open) bulkActionOpen=true"
+                    class="text-xs px-2 py-1 rounded bg-slate-800 hover:bg-sky-900/50 text-sky-300 focus:outline-none focus:ring-1 focus:ring-sky-500">
+              📦 Move to…
+            </button>
+            <div x-show="open" @click.outside="open=false; bulkActionOpen=false" x-cloak
+                 class="absolute top-7 left-0 z-20 w-64 rounded-lg bg-slate-800 border border-slate-700 shadow-xl p-2 space-y-1.5">
+              <select x-model="bulkLocationTarget"
+                      class="w-full px-2 py-1 rounded bg-slate-900 border border-slate-700 text-xs focus:outline-none focus:ring-1 focus:ring-sky-500">
+                <option value="">— pick a location —</option>
+                <template x-for="loc in storageLocations" :key="loc.id">
+                  <option :value="String(loc.id)" x-text="loc.name + ' (' + loc.kind + ')'"></option>
+                </template>
+                <option value="__clear">— clear location —</option>
+              </select>
+              <input x-model="bulkLocationPosition" placeholder="Position (optional, e.g. p5/s3)"
+                     class="w-full px-2 py-1 rounded bg-slate-900 border border-slate-700 text-xs focus:outline-none focus:ring-1 focus:ring-sky-500">
+              <div class="flex gap-1">
+                <button @click="newLocation.open = true"
+                        class="flex-1 px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-xs focus:outline-none focus:ring-1 focus:ring-fuchsia-500">
+                  + New
+                </button>
+                <button @click="bulkMoveToLocation(); open=false; bulkActionOpen=false"
+                        :disabled="!bulkLocationTarget"
+                        class="flex-1 px-2 py-1 rounded bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-xs focus:outline-none focus:ring-1 focus:ring-sky-400">
+                  Apply
+                </button>
+              </div>
+            </div>
+          </div>
+
           <!-- Move to bulk lot -->
           <div class="relative" x-data="{open:false}">
             <button @click="open=!open"
@@ -545,7 +634,12 @@
                         </template>
                         <div>
                           <div class="font-medium leading-tight" x-text="c.title"></div>
-                          <div class="text-xs text-slate-500" x-text="c.era + (c.condition?(' · '+c.condition):'')"></div>
+                          <div class="text-xs text-slate-500" x-text="(c.sport ? c.sport+' · ' : '') + c.era + (c.condition?(' · '+c.condition):'')"></div>
+                          <div x-show="c.storage_location_name" class="text-xs mt-0.5">
+                            <span class="px-1.5 py-0.5 rounded bg-sky-500/15 text-sky-300">
+                              📦 <span x-text="c.storage_location_name"></span><span x-show="c.storage_position" class="text-sky-400/70" x-text="' · '+(c.storage_position||'')"></span>
+                            </span>
+                          </div>
                         </div>
                       </div>
                     </td>
@@ -991,9 +1085,10 @@
   <!-- ============================================================ MODALS -->
 
   <!-- card edit modal -->
-  <div x-show="editing" x-cloak class="fixed inset-0 bg-slate-950/80 backdrop-blur grid place-items-center z-40 p-6"
+  <template x-if="editing">
+  <div class="fixed inset-0 bg-slate-950/80 backdrop-blur grid place-items-center z-40 p-6"
        @keydown.escape.window="editing=null">
-    <div class="bg-slate-900 border border-slate-700 rounded-xl p-5 max-w-lg w-full" @click.outside="editing=null" x-show="editing">
+    <div class="bg-slate-900 border border-slate-700 rounded-xl p-5 max-w-lg w-full" @click.outside="editing=null">
       <div class="flex items-start justify-between mb-3">
         <h3 class="font-semibold" x-text="editing?.title"></h3>
         <!-- C4: Re-identify button -->
@@ -1010,7 +1105,7 @@
           📦 <span x-text="(editing.grade||'PSA/SGC').split(' ')[0] || 'Grading'"></span> submission queued
         </div>
       </template>
-      <div class="grid grid-cols-2 gap-3 text-sm" x-show="editing">
+      <div class="grid grid-cols-2 gap-3 text-sm">
         <label class="block">Year<input type="number" x-model.number="editing.year" class="mt-1 w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700 focus:outline-none focus:ring-2 focus:ring-fuchsia-500"></label>
         <label class="block">Set<input x-model="editing.set_brand" class="mt-1 w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700 focus:outline-none focus:ring-2 focus:ring-fuchsia-500"></label>
         <label class="block">Player<input x-model="editing.player" class="mt-1 w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700 focus:outline-none focus:ring-2 focus:ring-fuchsia-500"></label>
@@ -1019,6 +1114,35 @@
         <label class="block">Condition<input x-model="editing.condition" class="mt-1 w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700 focus:outline-none focus:ring-2 focus:ring-fuchsia-500"></label>
         <label class="block">Est value<input type="number" step="0.01" x-model.number="editing.est_value_raw" class="mt-1 w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700 focus:outline-none focus:ring-2 focus:ring-fuchsia-500"></label>
         <label class="block">Status<input x-model="editing.status" class="mt-1 w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700 focus:outline-none focus:ring-2 focus:ring-fuchsia-500"></label>
+        <label class="block">Sport
+          <select x-model="editing.sport" class="mt-1 w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700 focus:outline-none focus:ring-2 focus:ring-fuchsia-500">
+            <option value="Baseball">Baseball</option>
+            <option value="Football">Football</option>
+            <option value="Basketball">Basketball</option>
+            <option value="Hockey">Hockey</option>
+            <option value="Soccer">Soccer</option>
+            <option value="Other">Other</option>
+          </select>
+        </label>
+        <!-- m10: storage location + position -->
+        <label class="block">
+          Storage location
+          <div class="mt-1 flex gap-1">
+            <select x-model="editing.storage_location_id" class="flex-1 px-2 py-1.5 rounded bg-slate-800 border border-slate-700 focus:outline-none focus:ring-2 focus:ring-fuchsia-500">
+              <option :value="null">— none —</option>
+              <template x-for="loc in storageLocations" :key="loc.id">
+                <option :value="loc.id" x-text="loc.name + ' (' + loc.kind + ')'"></option>
+              </template>
+            </select>
+            <button type="button" @click="newLocation.open = true"
+                    title="New location"
+                    class="px-2 py-1.5 rounded bg-slate-800 border border-slate-700 hover:bg-slate-700 focus:outline-none focus:ring-2 focus:ring-fuchsia-500">+</button>
+          </div>
+        </label>
+        <label class="block">Position
+          <input x-model="editing.storage_position" placeholder="e.g. p5/s3 or row 14"
+                 class="mt-1 w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700 focus:outline-none focus:ring-2 focus:ring-fuchsia-500">
+        </label>
         <label class="col-span-2 block">Notes<textarea x-model="editing.notes" rows="2" class="mt-1 w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700 focus:outline-none focus:ring-2 focus:ring-fuchsia-500"></textarea></label>
       </div>
       <div class="flex justify-between mt-4">
@@ -1030,6 +1154,102 @@
       </div>
     </div>
   </div>
+  </template>
+
+  <!-- m11: Pre-sync prompt — "where did this batch come from?" -->
+  <template x-if="syncPrompt.open">
+    <div class="fixed inset-0 z-[55] grid place-items-center bg-slate-950/80 p-4"
+         @click.self="syncPrompt.open = false"
+         @keydown.escape.window="syncPrompt.open = false">
+      <div class="bg-slate-900 border border-slate-700 rounded-xl max-w-md w-full p-5">
+        <div class="flex justify-between mb-3">
+          <h3 class="font-semibold">Where did this batch come from?</h3>
+          <button @click="syncPrompt.open = false" class="text-slate-400 hover:text-slate-200">✕</button>
+        </div>
+        <p class="text-xs text-slate-400 mb-4">
+          Every card created by this sync will get this storage tag. Skip if you'd rather assign locations later.
+        </p>
+        <div class="space-y-3 text-sm">
+          <label class="block">
+            Storage location
+            <div class="mt-1 flex gap-1">
+              <select x-model="syncPrompt.locationId"
+                      class="flex-1 px-2 py-1.5 rounded bg-slate-800 border border-slate-700 focus:outline-none focus:ring-2 focus:ring-fuchsia-500">
+                <option value="">— skip (assign later) —</option>
+                <template x-for="loc in storageLocations" :key="loc.id">
+                  <option :value="String(loc.id)" x-text="loc.name + ' (' + loc.kind + ')'"></option>
+                </template>
+              </select>
+              <button type="button" @click="newLocation.open = true"
+                      title="New location"
+                      class="px-2 py-1.5 rounded bg-slate-800 border border-slate-700 hover:bg-slate-700 focus:outline-none focus:ring-2 focus:ring-fuchsia-500">+</button>
+            </div>
+          </label>
+          <label class="block">
+            Position <span class="text-xs text-slate-500">(optional)</span>
+            <input x-model="syncPrompt.position" placeholder="e.g. p1/s1 or row 1"
+                   class="mt-1 w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700 focus:outline-none focus:ring-2 focus:ring-fuchsia-500">
+            <p class="text-xs text-slate-500 mt-1">Applies to every card in this batch. Edit per-card afterwards if needed.</p>
+          </label>
+        </div>
+        <div class="flex justify-end gap-2 mt-5">
+          <button @click="syncPrompt.open = false"
+                  class="px-3 py-1.5 rounded bg-slate-800 focus:outline-none focus:ring-2 focus:ring-slate-600">cancel</button>
+          <button @click="confirmSync()"
+                  class="px-3 py-1.5 rounded bg-fuchsia-600 hover:bg-fuchsia-500 focus:outline-none focus:ring-2 focus:ring-fuchsia-400">
+            <span x-show="syncPrompt.locationId" x-cloak>Sync to selected →</span>
+            <span x-show="!syncPrompt.locationId" x-cloak>Sync without tagging →</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  </template>
+
+  <!-- m10: New storage location mini-dialog (opened from edit modal or bulk toolbar) -->
+  <template x-if="newLocation.open">
+    <div class="fixed inset-0 z-[60] grid place-items-center bg-slate-950/80 p-4"
+         @click.self="newLocation.open = false">
+      <div class="bg-slate-900 border border-slate-700 rounded-xl max-w-sm w-full p-5">
+        <div class="flex justify-between mb-3">
+          <h3 class="font-semibold">New storage location</h3>
+          <button @click="newLocation.open = false" class="text-slate-400 hover:text-slate-200">✕</button>
+        </div>
+        <div class="space-y-3 text-sm">
+          <label class="block">
+            Name
+            <input x-model="newLocation.name" placeholder="e.g. Binder A, Long Box 2"
+                   @keydown.enter.prevent="createStorageLocation()"
+                   class="mt-1 w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700 focus:outline-none focus:ring-2 focus:ring-fuchsia-500"
+                   x-init="$nextTick(() => $el.focus())">
+            <p class="text-xs text-slate-500 mt-1">Case is preserved; lookup is case-insensitive — "BOX A" and "box a" are the same place.</p>
+          </label>
+          <label class="block">
+            Kind
+            <select x-model="newLocation.kind"
+                    class="mt-1 w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700 focus:outline-none focus:ring-2 focus:ring-fuchsia-500">
+              <option value="binder">Binder</option>
+              <option value="box">Box</option>
+              <option value="toploader_case">Toploader case</option>
+              <option value="sleeve_page">Sleeve page</option>
+              <option value="safe">Safe</option>
+              <option value="other">Other</option>
+            </select>
+          </label>
+          <label class="block">
+            Notes <span class="text-xs text-slate-500">(optional)</span>
+            <input x-model="newLocation.notes"
+                   class="mt-1 w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700 focus:outline-none focus:ring-2 focus:ring-fuchsia-500">
+          </label>
+        </div>
+        <div class="flex justify-end gap-2 mt-4">
+          <button @click="newLocation.open = false"
+                  class="px-3 py-1.5 rounded bg-slate-800 focus:outline-none focus:ring-2 focus:ring-slate-600">cancel</button>
+          <button @click="createStorageLocation()"
+                  class="px-3 py-1.5 rounded bg-fuchsia-600 hover:bg-fuchsia-500 focus:outline-none focus:ring-2 focus:ring-fuchsia-400">save</button>
+        </div>
+      </div>
+    </div>
+  </template>
 
   <!-- C1: Manual sale modal -->
   <template x-if="showManualSaleModal">
@@ -1162,10 +1382,11 @@
   </template>
 
   <!-- listing preview modal -->
-  <div x-show="listingPreview" x-cloak class="fixed inset-0 bg-slate-950/80 backdrop-blur grid place-items-center z-40 p-6">
-    <div class="bg-slate-900 border border-slate-700 rounded-xl p-5 max-w-2xl w-full" @click.outside="listingPreview=null" x-show="listingPreview">
+  <template x-if="listingPreview">
+  <div class="fixed inset-0 bg-slate-950/80 backdrop-blur grid place-items-center z-40 p-6">
+    <div class="bg-slate-900 border border-slate-700 rounded-xl p-5 max-w-2xl w-full" @click.outside="listingPreview=null">
       <h3 class="font-semibold mb-3">📦 eBay listing draft <span class="text-xs text-amber-300" x-text="env.ebay_env"></span></h3>
-      <div class="grid grid-cols-2 gap-3 text-sm" x-show="listingPreview">
+      <div class="grid grid-cols-2 gap-3 text-sm">
         <label class="col-span-2 block">Title<input x-model="listingPreview.title" maxlength="80" class="mt-1 w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700 focus:outline-none focus:ring-2 focus:ring-fuchsia-500"></label>
         <label class="block">Format
           <select x-model="listingPreview.format" class="mt-1 w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-700 focus:outline-none focus:ring-2 focus:ring-fuchsia-500">
@@ -1190,6 +1411,7 @@
       </div>
     </div>
   </div>
+  </template>
 
   <!-- settings modal -->
   <div x-show="openSettings" x-cloak class="fixed inset-0 bg-slate-950/80 backdrop-blur grid place-items-center z-40 p-6">

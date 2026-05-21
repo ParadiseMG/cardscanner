@@ -44,7 +44,9 @@ class Card(SQLModel, table=True):
     comp_fetched_at: Optional[datetime] = None
 
     # Storage / status
-    storage: Optional[str] = None
+    storage: Optional[str] = None  # legacy free-text; superseded by storage_location_id (m10)
+    storage_location_id: Optional[int] = Field(default=None, index=True)  # FK -> storagelocation.id
+    storage_position: Optional[str] = None  # free-text per-card position (e.g. "p5/s3", "row 14")
     status: str = "Researching"  # Researching / Ready / Listed / Sold / Bulk
     channel: Optional[str] = None  # eBay / Facebook / LCS / etc.
     notes: Optional[str] = None
@@ -151,6 +153,24 @@ class ScanJob(SQLModel, table=True):
     created_at: datetime = Field(default_factory=datetime.utcnow)
     # A4: JSON list of source image paths/IDs for batch-resume
     source_manifest: Optional[str] = None
+    # m11: when the user kicks off sync, they can declare "this whole batch
+    # came from <location>" — every Card the job creates inherits these.
+    storage_location_id: Optional[int] = None
+    storage_position: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# JobFailure — one row per failed file in a scan job. Surfaces the actual
+# error message in the dashboard so the user knows WHY something failed.
+# ---------------------------------------------------------------------------
+class JobFailure(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    scan_job_id: Optional[int] = Field(default=None, foreign_key="scanjob.id", index=True)
+    file_name: str
+    drive_id: Optional[str] = None  # Drive file ID, when applicable
+    error: str                       # short, human-readable
+    error_class: Optional[str] = None
+    occurred_at: datetime = Field(default_factory=datetime.utcnow)
 
 
 # ---------------------------------------------------------------------------
@@ -238,3 +258,30 @@ class HitWatchlistEntry(SQLModel, table=True):
     card_no: Optional[str] = None
     typical_value: Optional[float] = None
     reason: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# StorageLocation — a named place a card sits (binder, box, toploader case…).
+# ---------------------------------------------------------------------------
+# `name` is unique case-insensitively at the DB layer (`COLLATE NOCASE` is
+# applied in the m10 migration). The display value preserves whatever case
+# the user originally typed; lookups normalize via case-insensitive compare.
+KNOWN_STORAGE_KINDS = (
+    "binder", "box", "toploader_case", "sleeve_page", "safe", "other"
+)
+
+
+class StorageLocation(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str = Field(index=True)        # e.g. "Binder A", "Long Box 2"
+    kind: str = "other"                  # display hint; see KNOWN_STORAGE_KINDS
+    notes: Optional[str] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+def normalize_location_name(raw: str) -> str:
+    """Trim and collapse internal whitespace so 'Box  A' == 'Box A'.
+
+    Case is preserved — case-insensitive collation handles 'box a' == 'Box A'.
+    """
+    return " ".join((raw or "").split())

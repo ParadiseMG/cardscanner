@@ -13,9 +13,12 @@ from app.db import init_db
 from app.routers import scan, inventory, stats, auth, listings, sync, drive, health as health_router
 from app.routers import bulk as bulk_router
 from app.routers import suggestions as suggestions_router
+from app.routers import diag as diag_router
 from app.routers import sales as sales_router
 from app.routers import grading as grading_router
 from app.routers import bulk_lots as bulk_lots_router
+from app.routers import storage_locations as storage_locations_router
+from app.routers import captcha as captcha_router
 from app.utils import logger as _log
 
 
@@ -133,9 +136,12 @@ def create_app() -> FastAPI:
     app.include_router(health_router.router, prefix="/api")
     app.include_router(bulk_router.router, prefix="/api")
     app.include_router(suggestions_router.router, prefix="/api")
+    app.include_router(diag_router.router, prefix="/api")
     app.include_router(sales_router.router, prefix="/api")
     app.include_router(grading_router.router, prefix="/api")
     app.include_router(bulk_lots_router.router, prefix="/api")
+    app.include_router(storage_locations_router.router, prefix="/api")
+    app.include_router(captcha_router.router)
 
     # Serve uploaded card images
     app.mount("/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")

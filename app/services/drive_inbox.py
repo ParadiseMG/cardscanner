@@ -135,7 +135,7 @@ def ensure_folders() -> InboxFolders:
 # ---------------------------------------------------------------------------
 # File operations
 # ---------------------------------------------------------------------------
-IMAGE_MIMES = {"image/jpeg", "image/png", "image/webp", "image/heic"}
+IMAGE_MIMES = {"image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"}
 PAIR_RE = re.compile(r"^(?P<base>.+?)_(?P<side>front|back)\.(?P<ext>[A-Za-z0-9]+)$", re.I)
 
 

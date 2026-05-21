@@ -6,10 +6,12 @@ long edge at 1600px so we don't waste tokens on huge files.
 """
 from __future__ import annotations
 
+from datetime import datetime
 from io import BytesIO
 from pathlib import Path
+from typing import Optional
 
-from PIL import Image, ImageOps
+from PIL import ExifTags, Image, ImageOps
 
 # Register HEIC opener with PIL.
 try:
@@ -73,3 +75,55 @@ def normalize(path: Path) -> Path:
         # If we can't open it (corrupt, unknown format), return as-is and let
         # the downstream caller surface the error.
         return path
+
+
+# ---------------------------------------------------------------------------
+# EXIF capture time — used by the auto-pairer to group front+back shots.
+# ---------------------------------------------------------------------------
+_DATETIME_TAGS = {"DateTimeOriginal", "DateTimeDigitized", "DateTime"}
+
+
+def read_capture_time(path: Path) -> Optional[datetime]:
+    """Return the photo's capture time from EXIF, or None if unreadable.
+
+    Handles JPEG, PNG (via XMP), and HEIC (via pillow-heif). The standard
+    EXIF format is "YYYY:MM:DD HH:MM:SS".
+    """
+    if not path.exists():
+        return None
+    try:
+        with Image.open(path) as im:
+            exif = im.getexif()
+            if not exif:
+                return None
+            # Look in the top-level EXIF block first
+            for tag_id, val in exif.items():
+                name = ExifTags.TAGS.get(tag_id)
+                if name in _DATETIME_TAGS and val:
+                    return _parse_exif_dt(val)
+            # Then the dedicated Exif IFD (where DateTimeOriginal usually lives)
+            try:
+                ifd = exif.get_ifd(0x8769)
+            except Exception:
+                ifd = {}
+            for tag_id, val in (ifd or {}).items():
+                name = ExifTags.TAGS.get(tag_id)
+                if name in _DATETIME_TAGS and val:
+                    return _parse_exif_dt(val)
+    except Exception:
+        return None
+    return None
+
+
+def _parse_exif_dt(value) -> Optional[datetime]:
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", errors="ignore")
+    if not isinstance(value, str):
+        return None
+    value = value.strip().rstrip("\x00")
+    for fmt in ("%Y:%m:%d %H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y:%m:%dT%H:%M:%S"):
+        try:
+            return datetime.strptime(value, fmt)
+        except ValueError:
+            continue
+    return None

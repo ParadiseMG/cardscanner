@@ -86,6 +86,7 @@ function cardscanner() {
     filterReview: false,
     sortBy: 'recent',
     filterEra: [],
+    filterSport: [],
     filterEbayStatus: '',
     filterMinValue: '',
     filterMaxValue: '',
@@ -102,6 +103,15 @@ function cardscanner() {
     bulkChannelTarget: '',
     bulkNoteText: '',
     bulkLotLabel: '',
+    bulkLocationTarget: '',
+    bulkLocationPosition: '',
+
+    // ---- storage locations (m10) ----
+    storageLocations: [],         // [{id,name,kind,notes,card_count,created_at}]
+    storageFilterId: '',          // current inventory storage filter (string for select compat)
+    newLocation: { open: false, name: '', kind: 'binder', notes: '' },
+    // m11: "where did this batch come from?" prompt
+    syncPrompt: { open: false, locationId: '', position: '' },
 
     // ---- keyboard nav (B4) ----
     focusedRowIndex: -1,
@@ -156,6 +166,9 @@ function cardscanner() {
     buildLotCardIds: [],
     buildLotIdsText: '',
 
+    // ---- R5: failures + retry ----
+    recentFailures: [],
+
     // ---- C4: Re-identify spinner ----
     reidentifySpinner: false,
 
@@ -191,9 +204,81 @@ function cardscanner() {
       await Promise.all([
         this.loadStats(), this.loadInsights(), this.loadActionQ(),
         this.loadRecent(), this.loadInventory(), this.loadListings(),
-        this.loadEnv(), this.loadStripe(),
+        this.loadEnv(), this.loadStripe(), this.loadRecentFailures(),
+        this.loadStorageLocations(),
       ]);
       this.drawCharts();
+    },
+
+    // m10: storage location helpers
+    async loadStorageLocations() {
+      try {
+        const r = await fetch('/api/storage-locations').then(r => r.json());
+        this.storageLocations = Array.isArray(r) ? r : [];
+      } catch (e) { this.storageLocations = []; }
+    },
+
+    async createStorageLocation() {
+      const name = (this.newLocation.name || '').trim();
+      if (!name) return;
+      try {
+        const r = await fetch('/api/storage-locations', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            name,
+            kind: this.newLocation.kind || 'other',
+            notes: this.newLocation.notes || null,
+          }),
+        });
+        if (!r.ok) throw new Error('status ' + r.status);
+        const loc = await r.json();
+        await this.loadStorageLocations();
+        // Auto-select the new (or matched) location in whichever context opened the dialog.
+        if (this.editing) this.editing.storage_location_id = loc.id;
+        if (this.bulkActionOpen) this.bulkLocationTarget = String(loc.id);
+        this.newLocation = { open: false, name: '', kind: 'binder', notes: '' };
+        this._showToastMsg(`Saved location "${loc.name}".`);
+      } catch (e) {
+        this._showToastMsg('Could not save location: ' + e.message);
+      }
+    },
+
+    async bulkMoveToLocation() {
+      if (!this.selectedIds.length) return;
+      const patch = {};
+      if (this.bulkLocationTarget === '' || this.bulkLocationTarget === null) return;
+      patch.storage_location_id = this.bulkLocationTarget === '__clear'
+        ? null
+        : Number(this.bulkLocationTarget);
+      if (this.bulkLocationPosition) patch.storage_position = this.bulkLocationPosition;
+      await fetch('/api/bulk/patch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: this.selectedIds, patch }),
+      });
+      this.bulkLocationTarget = '';
+      this.bulkLocationPosition = '';
+      this.selectedIds = [];
+      await Promise.all([this.loadInventory(), this.loadStorageLocations()]);
+    },
+
+    // R5: failures + retry
+    async loadRecentFailures() {
+      try {
+        const r = await fetch('/api/scans/recent-failures?limit=30').then(r => r.json());
+        this.recentFailures = r.items || [];
+      } catch (e) { this.recentFailures = []; }
+    },
+
+    async retryFailedDrive() {
+      if (!confirm('Move every file from Drive Failed/ back to To Be Processed/?')) return;
+      const r = await fetch('/api/drive/retry-failed', {method: 'POST'}).then(r => r.json());
+      this.toast = {icon: '🔁', title: `${r.moved} files re-queued`,
+                    description: 'Click Sync to re-process them.', tier: 'silver'};
+      setTimeout(() => this.toast = null, 4000);
+      this.loadRecentFailures();
+      this.loadEnv();  // refresh inbox count
     },
 
     // =========================================================================
@@ -255,6 +340,11 @@ function cardscanner() {
       if (this.filterRelic)     params.set('relic', 'true');
       if (this.filterGraded)    params.set('graded', 'true');
       for (const era of this.filterEra) params.append('era', era);
+      for (const sp of this.filterSport) params.append('sport', sp);
+      // m10: storage location filter ('' = any, '0' = unassigned, N = specific)
+      if (this.storageFilterId !== '' && this.storageFilterId !== null && this.storageFilterId !== undefined) {
+        params.set('storage_location_id', String(this.storageFilterId));
+      }
       return params;
     },
 
@@ -490,6 +580,13 @@ function cardscanner() {
       const idx = this.filterEra.indexOf(era);
       if (idx === -1) this.filterEra.push(era);
       else this.filterEra.splice(idx, 1);
+      this.applyFilters();
+    },
+
+    toggleSportFilter(sport) {
+      const idx = this.filterSport.indexOf(sport);
+      if (idx === -1) this.filterSport.push(sport);
+      else this.filterSport.splice(idx, 1);
       this.applyFilters();
     },
 
@@ -780,11 +877,48 @@ function cardscanner() {
     // =========================================================================
     // Scan / Drive / upload
     // =========================================================================
-    async syncDrive() {
-      const headers = {};
+    // Manual click: prompt for the batch's storage location, then sync.
+    // Pre-fill with whatever was used last (saved in localStorage) so a stack
+    // of batches from the same binder doesn't require re-typing.
+    openSyncPrompt() {
+      const last = localStorage.getItem('sync_last_location_id');
+      this.syncPrompt = {
+        open: true,
+        locationId: last || '',
+        position: localStorage.getItem('sync_last_position') || '',
+      };
+    },
+
+    // Called by the prompt's Sync button; passes the chosen tag to the backend.
+    async confirmSync() {
+      const body = {};
+      if (this.syncPrompt.locationId !== '' && this.syncPrompt.locationId !== '__none') {
+        body.storage_location_id = Number(this.syncPrompt.locationId);
+        localStorage.setItem('sync_last_location_id', this.syncPrompt.locationId);
+      } else {
+        localStorage.removeItem('sync_last_location_id');
+      }
+      if (this.syncPrompt.position) {
+        body.storage_position = this.syncPrompt.position;
+        localStorage.setItem('sync_last_position', this.syncPrompt.position);
+      } else {
+        localStorage.removeItem('sync_last_position');
+      }
+      this.syncPrompt.open = false;
+      await this.syncDrive(body);
+    },
+
+    // Lower-level: actually trigger the sync. `tag` is the optional body
+    // {storage_location_id, storage_position}. Used directly by auto-poll
+    // (no prompt) and by confirmSync (with the prompt's selection).
+    async syncDrive(tag) {
+      const headers = { 'Content-Type': 'application/json' };
       const key = localStorage.getItem('anthropic_key');
       if (key) headers['X-Anthropic-Key'] = key;
-      const res = await fetch('/api/drive/sync', { method: 'POST', headers }).then(r => r.json());
+      const body = tag && Object.keys(tag).length ? JSON.stringify(tag) : null;
+      const res = await fetch('/api/drive/sync', {
+        method: 'POST', headers, body,
+      }).then(r => r.json());
       if (!res.job_id) { alert('Drive sync failed: ' + JSON.stringify(res)); return; }
       this.job = { id: res.job_id, total: 0, processed: 0, status: 'queued' };
       if (this.jobPoll) clearInterval(this.jobPoll);
@@ -798,7 +932,15 @@ function cardscanner() {
       if (this.autoPoll) {
         this.autoTimer = setInterval(() => {
           if (!this.job && this.drive.connected && (this.drive.inbox_count || 0) > 0) {
-            this.syncDrive();
+            // Auto-poll runs silently — reuse whatever location/position was
+            // picked in the most recent manual sync so unattended batches
+            // still get tagged.
+            const tag = {};
+            const last = localStorage.getItem('sync_last_location_id');
+            if (last) tag.storage_location_id = Number(last);
+            const pos = localStorage.getItem('sync_last_position');
+            if (pos) tag.storage_position = pos;
+            this.syncDrive(tag);
           }
         }, 5 * 60 * 1000);
       }
@@ -1307,11 +1449,15 @@ function cardscanner() {
 
     async saveCard() {
       const id = this.editing.id;
-      const payload = (({ year, set_brand, player, card_no, parallel, condition, est_value_raw, status, channel, notes, is_graded, is_autograph, is_relic }) =>
-        ({ year, set_brand, player, card_no, parallel, condition, est_value_raw, status, channel, notes, is_graded, is_autograph, is_relic }))(this.editing);
+      const payload = (({ year, set_brand, player, card_no, parallel, condition, est_value_raw, status, channel, notes, is_graded, is_autograph, is_relic, sport, storage_location_id, storage_position }) =>
+        ({ year, set_brand, player, card_no, parallel, condition, est_value_raw, status, channel, notes, is_graded, is_autograph, is_relic, sport, storage_location_id, storage_position }))(this.editing);
+      // Coerce empty string from <select> to null so the backend clears the field.
+      if (payload.storage_location_id === '' || payload.storage_location_id === undefined) {
+        payload.storage_location_id = null;
+      }
       await fetch('/api/inventory/' + id, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
       this.editing = null;
-      await this.loadInventory();
+      await Promise.all([this.loadInventory(), this.loadStorageLocations()]);
       this._scheduleIdleFacets();
     },
 

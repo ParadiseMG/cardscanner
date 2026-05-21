@@ -84,18 +84,19 @@ class CardIdentification:
         return asdict(self)
 
 
-_PROMPT = """You are a baseball-card cataloging assistant.
+_PROMPT = """You are a sports-card cataloging assistant. The card may be from any
+sport — read the brand, team, and uniform carefully before declaring a sport.
 
 Examine the supplied photo(s) of a single trading card (front, and possibly
 back). Return STRICT JSON ONLY with these keys -- no prose, no markdown fences:
 
 {
   "year": <int or null>,
-  "set_brand": <string or null e.g. "Topps Chrome">,
+  "set_brand": <string or null e.g. "Topps Chrome", "Panini Prestige Football">,
   "player": <string or null>,
   "card_no": <string or null, the printed card number>,
   "parallel": <string, default "Base">,
-  "sport": <string, default "Baseball">,
+  "sport": <one of "Baseball" | "Football" | "Basketball" | "Hockey" | "Soccer" | "Other">,
   "team": <string or null>,
   "condition": <string: "NM" / "EX" / "VG" / "GD" / "PR" / "Graded">,
   "is_graded": <bool, true only if visibly slabbed by PSA/BGS/SGC/CGC>,
@@ -151,14 +152,23 @@ Guidelines:
 # Backend selection
 # ---------------------------------------------------------------------------
 def _backend(api_key_override: Optional[str]) -> str:
-    """Choose 'cli' or 'http'. Override with env var CLAUDE_BACKEND."""
+    """Choose 'ollama', 'cli', or 'http'.
+
+    Priority: settings.vision_backend > env CLAUDE_BACKEND > auto-detect.
+    """
+    # Explicit setting in config takes priority
+    configured = settings.vision_backend.strip().lower()
+    if configured in {"ollama", "cli", "http"}:
+        return configured
+
+    # Legacy env var override
     explicit = (os.environ.get("CLAUDE_BACKEND") or "").strip().lower()
-    if explicit in {"cli", "http"}:
+    if explicit in {"ollama", "cli", "http"}:
         return explicit
-    # If caller is supplying a key explicitly per-request, they want HTTP.
+
+    # Auto-detect (original logic)
     if api_key_override:
         return "http"
-    # Prefer CLI if it's installed and we don't have a key set
     if shutil.which("claude"):
         return "cli"
     return "http"
@@ -303,6 +313,64 @@ async def _cli_call(
 
 
 # ---------------------------------------------------------------------------
+# Ollama backend
+# ---------------------------------------------------------------------------
+OLLAMA_TIMEOUT_SECONDS = 120.0  # local models are slower than API
+
+async def _ollama_call(
+    fp: Path,
+    bp: Optional[Path],
+    prompt_text: str,
+    *,
+    max_tokens: int = 800,
+) -> str:
+    """Call the Ollama /api/chat endpoint with vision. Returns raw text."""
+    images = [base64.standard_b64encode(fp.read_bytes()).decode()]
+    if bp:
+        images.append(base64.standard_b64encode(bp.read_bytes()).decode())
+
+    parts = ["Front of card:"]
+    if bp:
+        parts.append("(Second image is the back of the card.)")
+    parts.append(prompt_text)
+
+    payload = {
+        "model": settings.ollama_vision_model,
+        "messages": [
+            {"role": "user", "content": "\n\n".join(parts), "images": images},
+        ],
+        "stream": False,
+        "options": {"num_predict": max_tokens},
+    }
+
+    url = f"{settings.ollama_base_url.rstrip('/')}/api/chat"
+
+    async def _call() -> str:
+        async with httpx.AsyncClient(timeout=OLLAMA_TIMEOUT_SECONDS) as client:
+            r = await client.post(url, json=payload, timeout=OLLAMA_TIMEOUT_SECONDS)
+            r.raise_for_status()
+            data = r.json()
+            return data.get("message", {}).get("content", "")
+
+    return await with_backoff(
+        _call, attempts=RETRY_ATTEMPTS, base_delay=2.0,
+        on_retry=lambda n, e: log.warning(
+            "ollama retry", extra={"attempt": n, "error": type(e).__name__}),
+    )
+
+
+def _ollama_fallback_backend(api_key_override: Optional[str]) -> Optional[str]:
+    """If Ollama fails, pick a Claude backend to fall back to (or None)."""
+    if api_key_override:
+        return "http"
+    if shutil.which("claude"):
+        return "cli"
+    if settings.anthropic_api_key:
+        return "http"
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Re-prompt path (uses whichever backend ran the original call)
 # ---------------------------------------------------------------------------
 def _build_reprompt_text(field_name: str, current_value) -> str:
@@ -329,7 +397,9 @@ async def _do_reprompt(
     backend = _backend(key)
     prompt_text = _build_reprompt_text(field_name, current_value)
     try:
-        if backend == "cli":
+        if backend == "ollama":
+            raw = await _ollama_call(fp, bp, prompt_text, max_tokens=100)
+        elif backend == "cli":
             raw = await _cli_call(fp, bp, prompt_text)
         else:
             raw = await _http_call(fp, bp, prompt_text, key, client=client, max_tokens=100)
@@ -364,9 +434,24 @@ async def identify_card_async(
     log.info("vision call", extra={"backend": backend, "front": fp.name,
                                     "back": bp.name if bp else None})
 
+    if backend == "ollama":
+        try:
+            raw = await _ollama_call(fp, bp, _PROMPT)
+        except Exception as ollama_exc:
+            fallback = _ollama_fallback_backend(api_key_override)
+            if fallback is None:
+                raise RuntimeError(
+                    f"Ollama failed ({ollama_exc}) and no Claude fallback available"
+                ) from ollama_exc
+            log.warning("ollama failed, falling back",
+                        extra={"error": str(ollama_exc), "fallback": fallback})
+            backend = fallback
+            if backend == "http":
+                key = _key_or_raise(api_key_override)
+
     if backend == "cli":
         raw = await _cli_call(fp, bp, _PROMPT)
-    else:
+    elif backend == "http":
         raw = await _http_call(fp, bp, _PROMPT, key, client=client)
 
     parsed = _parse_json_block(raw)
@@ -393,7 +478,9 @@ async def identify_card_async(
         player=parsed.get("player"),
         card_no=str(parsed["card_no"]) if parsed.get("card_no") is not None else None,
         parallel=parsed.get("parallel") or "Base",
-        sport=parsed.get("sport") or "Baseball",
+        # Sport is reconciled with our heuristic downstream in the pipeline;
+        # here we just pass through Claude's answer (or empty for inference).
+        sport=parsed.get("sport") or "",
         team=parsed.get("team"),
         condition=parsed.get("condition"),
         is_graded=bool(parsed.get("is_graded", False)),

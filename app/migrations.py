@@ -191,6 +191,87 @@ def m8_grading_bulk(engine: Engine) -> None:
         """))
 
 
+def m9_job_failures(engine: Engine) -> None:
+    """Create the jobfailure table for surfacing per-file scan errors."""
+    with engine.begin() as conn:
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS jobfailure (
+                id INTEGER PRIMARY KEY,
+                scan_job_id INTEGER,
+                file_name TEXT NOT NULL,
+                drive_id TEXT,
+                error TEXT NOT NULL,
+                error_class TEXT,
+                occurred_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_jobfailure_scan_job_id ON jobfailure(scan_job_id)"
+        ))
+
+
+def m10_storage_locations(engine: Engine) -> None:
+    """Create the storagelocation table + add storage_location_id / storage_position to card.
+
+    `name COLLATE NOCASE UNIQUE` makes 'Box A', 'BOX A', and 'box a' the same key
+    at the database level — any INSERT of a colliding variant fails the unique
+    constraint, and the API layer's idempotent POST returns the existing row
+    instead of erroring.
+
+    SQLModel's `create_all()` runs before migrations and will eagerly create
+    `storagelocation` with default (non-COLLATE) constraints. We detect that
+    case via `PRAGMA index_list` and drop the table before recreating it with
+    the correct schema. Safe to do unconditionally: this migration only runs
+    once (the runner skips it on re-runs via schema_version).
+    """
+    with engine.begin() as conn:
+        # Drop any pre-existing version (SQLModel's auto-created table lacks
+        # the COLLATE NOCASE UNIQUE constraint we need).
+        conn.execute(text("DROP TABLE IF EXISTS storagelocation"))
+        conn.execute(text("""
+            CREATE TABLE storagelocation (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+                kind TEXT NOT NULL DEFAULT 'other',
+                notes TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """))
+        # Idempotent column adds — guard against partial-migration replay.
+        existing = {row[1] for row in conn.execute(text("PRAGMA table_info(card)")).fetchall()}
+        for col_name, col_def in [
+            ("storage_location_id", "INTEGER"),
+            ("storage_position",    "TEXT"),
+        ]:
+            if col_name not in existing:
+                conn.execute(text(
+                    f"ALTER TABLE card ADD COLUMN {col_name} {col_def}"
+                ))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_card_storage_location_id "
+            "ON card(storage_location_id)"
+        ))
+
+
+def m11_scanjob_storage(engine: Engine) -> None:
+    """Add per-job storage tag columns so 'this whole sync went into Binder A'
+    can be expressed once and applied to every Card the job creates.
+
+    Persisted on the job (not just kept in memory) so a mid-sync restart can
+    resume the job without losing the tag.
+    """
+    with engine.begin() as conn:
+        existing = {row[1] for row in conn.execute(text("PRAGMA table_info(scanjob)")).fetchall()}
+        for col_name, col_def in [
+            ("storage_location_id", "INTEGER"),
+            ("storage_position",    "TEXT"),
+        ]:
+            if col_name not in existing:
+                conn.execute(text(
+                    f"ALTER TABLE scanjob ADD COLUMN {col_name} {col_def}"
+                ))
+
+
 MIGRATIONS: list[tuple[int, str, Callable[[Engine], None]]] = [
     (1, "baseline", m1_baseline),
     (2, "add card year/player index", m2_add_card_indexes),
@@ -200,6 +281,9 @@ MIGRATIONS: list[tuple[int, str, Callable[[Engine], None]]] = [
     (6, "comp intelligence fields", m6_comp_intelligence),
     (7, "sales tracking fields", m7_sales_tracking),
     (8, "grading and bulk-lot fields", m8_grading_bulk),
+    (9, "job failures table", m9_job_failures),
+    (10, "storage locations table + card columns", m10_storage_locations),
+    (11, "per-scanjob storage tag", m11_scanjob_storage),
 ]
 
 

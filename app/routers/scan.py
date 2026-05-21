@@ -75,3 +75,37 @@ def list_jobs() -> list[dict]:
              "finished_at": j.finished_at.isoformat() if j.finished_at else None}
             for j in jobs
         ]
+
+
+@router.get("/scans/recent-failures")
+def recent_failures(limit: int = 30) -> dict:
+    """Most recent JobFailure rows so the dashboard can show the user WHY."""
+    with Session(get_engine()) as s:
+        rows = s.exec(
+            select(models.JobFailure)
+            .order_by(models.JobFailure.id.desc())
+            .limit(limit)
+        ).all()
+        return {"items": [
+            {"id": f.id, "scan_job_id": f.scan_job_id, "file_name": f.file_name,
+             "drive_id": f.drive_id, "error": f.error,
+             "error_class": f.error_class,
+             "occurred_at": f.occurred_at.isoformat() if f.occurred_at else None}
+            for f in rows
+        ]}
+
+
+@router.get("/scans/jobs/{job_id}/failures")
+def job_failures(job_id: int) -> dict:
+    with Session(get_engine()) as s:
+        rows = s.exec(
+            select(models.JobFailure)
+            .where(models.JobFailure.scan_job_id == job_id)
+            .order_by(models.JobFailure.id)
+        ).all()
+        return {"items": [
+            {"id": f.id, "file_name": f.file_name, "error": f.error,
+             "error_class": f.error_class,
+             "occurred_at": f.occurred_at.isoformat() if f.occurred_at else None}
+            for f in rows
+        ]}

@@ -13,6 +13,12 @@ from app.db import get_engine, session_scope
 from app.utils import logger as _log
 
 router = APIRouter()
+
+# Hold references to fire-and-forget background tasks so they don't get GC'd
+# mid-execution — asyncio.create_task only stores a weak reference, and the
+# bulk recompute loop took 0/32 because the task was collected before its
+# first await resolved.
+_BG_TASKS: "set[asyncio.Task]" = set()
 log = _log.get(__name__)
 
 
@@ -119,8 +125,21 @@ class BulkPatchResponse(BaseModel):
 
 @router.post("/bulk/patch", response_model=BulkPatchResponse)
 def bulk_patch(body: BulkPatchBody) -> BulkPatchResponse:
-    """Apply a patch to every listed card in a single transaction."""
+    """Apply a patch to every listed card in a single transaction.
+
+    Accepted patch keys: status, channel, notes_append, storage_location_id
+    (pass null to clear), storage_position.
+    """
+    from datetime import datetime
+    from fastapi import HTTPException
     updated = 0
+    # If the patch references a storage_location_id, verify it exists once up
+    # front rather than re-fetching on every iteration.
+    loc_id = body.patch.get("storage_location_id", "_unset")
+    if loc_id != "_unset" and loc_id is not None:
+        with Session(get_engine()) as s:
+            if not s.get(models.StorageLocation, loc_id):
+                raise HTTPException(400, "storage_location_id does not exist")
     with _log.step(log, "bulk_patch", count=len(body.ids), patch=body.patch):
         with session_scope() as s:
             for cid in body.ids:
@@ -134,7 +153,10 @@ def bulk_patch(body: BulkPatchBody) -> BulkPatchResponse:
                 if "notes_append" in body.patch and body.patch["notes_append"]:
                     existing = c.notes or ""
                     c.notes = (existing + "\n" + body.patch["notes_append"]).strip()
-                from datetime import datetime
+                if loc_id != "_unset":
+                    c.storage_location_id = loc_id  # may be None to clear
+                if "storage_position" in body.patch:
+                    c.storage_position = body.patch["storage_position"]
                 c.updated_at = datetime.utcnow()
                 s.add(c)
                 updated += 1
@@ -180,7 +202,7 @@ class BulkRecomputeResponse(BaseModel):
 
 
 @router.post("/bulk/recompute-comps", response_model=BulkRecomputeResponse)
-def bulk_recompute_comps(body: BulkIdsBody) -> BulkRecomputeResponse:
+async def bulk_recompute_comps(body: BulkIdsBody) -> BulkRecomputeResponse:
     """Queue a re-comp run for each card. Does not block the request."""
     with _log.step(log, "bulk_recompute_comps", count=len(body.ids)):
         # Verify cards exist and gather their data while session is open
@@ -200,6 +222,8 @@ def bulk_recompute_comps(body: BulkIdsBody) -> BulkRecomputeResponse:
 
         async def _run_recompute():
             from app.services import comp_lookup
+            log.info("bulk_recompute starting", extra={"count": len(card_specs)})
+            done = 0
             for spec in card_specs:
                 try:
                     comp = await comp_lookup.fetch_comps(
@@ -217,15 +241,20 @@ def bulk_recompute_comps(body: BulkIdsBody) -> BulkRecomputeResponse:
                             c.comp_url = comp.url
                             c.comp_fetched_at = datetime.utcnow()
                             s.add(c)
+                    done += 1
+                    if done % 5 == 0:
+                        log.info("bulk_recompute progress",
+                                 extra={"done": done, "total": len(card_specs)})
                 except Exception as e:
-                    log.warning("recompute comp fail", extra={"card_id": spec["id"], "error": str(e)})
+                    log.warning("recompute comp fail",
+                                extra={"card_id": spec["id"], "error": str(e)})
+            log.info("bulk_recompute complete", extra={"done": done})
 
-        try:
-            loop = asyncio.get_running_loop()
-            loop.create_task(_run_recompute())
-        except RuntimeError:
-            # No running event loop in test context — skip the async task
-            pass
+        # Endpoint is async, so there's always a running loop here. Store the
+        # task ref to keep it alive (create_task only holds a weak ref).
+        task = asyncio.create_task(_run_recompute())
+        _BG_TASKS.add(task)
+        task.add_done_callback(_BG_TASKS.discard)
 
     return BulkRecomputeResponse(queued=len(card_specs))
 

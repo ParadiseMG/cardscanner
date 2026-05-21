@@ -4,12 +4,16 @@ body { font-family: -apple-system, BlinkMacSystemFont, "Inter", system-ui, sans-
 ::-webkit-scrollbar-thumb { background: #334155; border-radius: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
 
-/* B1: Virtual scroller — fixed-height container so we can window rows */
+/* B1: Virtual scroller — fixed-height container so we can window rows.
+   `contain: strict` collapses the box: it includes `size`, which ignores
+   child heights when computing intrinsic size, so a `max-height` alone
+   resolves to 0. Use the weaker `layout paint` and give the box a real
+   height. */
 .inv-scroll-container {
-  max-height: 560px;
+  height: 560px;
+  max-height: 70vh;
   overflow-y: auto;
-  /* contain layout so browser can skip off-screen paint */
-  contain: strict;
+  contain: layout paint;
 }
 
 /* B1: Each inventory row must have a predictable height that matches ROW_HEIGHT in app.js */

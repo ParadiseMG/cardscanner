@@ -1,0 +1,30 @@
+services:
+  cardscanner:
+    build: .
+    container_name: cardscanner
+    restart: unless-stopped
+    ports:
+      - "8765:8765"
+    volumes:
+      - cardscanner-data:/data
+    env_file:
+      - .env
+    environment:
+      - DB_PATH=/data/cardscanner.db
+      - GOOGLE_TOKEN_PATH=/data/google_token.json
+      - EBAY_TOKEN_PATH=/data/ebay_token.json
+      - GOOGLE_OAUTH_CLIENT_SECRETS=/data/google_client_secret.json
+      - CARDSCANNER_PW_HEADLESS=1
+      - CARDSCANNER_PW_PROFILE=/data/playwright-profile
+      - HOST=0.0.0.0
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8765/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  cardscanner-data:
