@@ -12,6 +12,7 @@ from typing import Optional
 import cv2
 import numpy as np
 
+from app.config import settings
 from app.utils.images import normalize
 
 logger = logging.getLogger(__name__)
@@ -63,9 +64,6 @@ def pick_best_frame(frames: list[np.ndarray]) -> int:
 # --- High-level extraction ---
 
 DOWNSCALE_WIDTH = 320
-MIN_STILL_SECONDS = 0.3
-MOTION_THRESHOLD = 50.0
-MIN_SHARPNESS = 20.0
 
 
 def extract_frames(video_path: Path, on_progress: Optional[callable] = None) -> list[Path]:
@@ -85,7 +83,10 @@ def extract_frames(video_path: Path, on_progress: Optional[callable] = None) -> 
 
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    min_still_frames = max(int(fps * MIN_STILL_SECONDS), 5)
+    motion_threshold = settings.video_motion_threshold
+    min_still_seconds = settings.video_min_still_seconds
+    min_sharpness = settings.video_min_sharpness
+    min_still_frames = max(int(fps * min_still_seconds), 3)
 
     if on_progress:
         on_progress("reading", 0, total_frames)
@@ -122,16 +123,28 @@ def extract_frames(video_path: Path, on_progress: Optional[callable] = None) -> 
     if not motion_scores:
         raise ValueError("Video contains no frames")
 
+    # Diagnostic: log motion score distribution so we can tune thresholds
+    scores_arr = np.array(motion_scores)
+    logger.info(
+        "Motion scores — min=%.1f median=%.1f p75=%.1f p90=%.1f max=%.1f threshold=%.1f",
+        float(np.min(scores_arr)), float(np.median(scores_arr)),
+        float(np.percentile(scores_arr, 75)), float(np.percentile(scores_arr, 90)),
+        float(np.max(scores_arr)), motion_threshold,
+    )
+
     # Find still windows
-    windows = find_still_windows(motion_scores, MOTION_THRESHOLD, min_still_frames)
+    windows = find_still_windows(motion_scores, motion_threshold, min_still_frames)
 
     if not windows:
         raise ValueError(
             "No cards detected — no still moments found. "
-            "Try holding each card still for about a second."
+            "Try holding each card still for about a moment. "
+            f"(threshold={motion_threshold}, min_frames={min_still_frames}, "
+            f"median_motion={float(np.median(scores_arr)):.1f})"
         )
 
-    logger.info("Found %d still windows in %d frames (%.1f fps)", len(windows), total_frames, fps)
+    logger.info("Found %d still windows in %d frames (%.1f fps, threshold=%.1f, min_still=%d)",
+                len(windows), total_frames, fps, motion_threshold, min_still_frames)
 
     if on_progress:
         on_progress("extracting", 0, len(windows))
@@ -164,10 +177,10 @@ def extract_frames(video_path: Path, on_progress: Optional[callable] = None) -> 
             # Check sharpness minimum
             gray = cv2.cvtColor(best_frame, cv2.COLOR_BGR2GRAY)
             sharp = sharpness_score(gray)
-            if sharp < MIN_SHARPNESS:
+            if sharp < min_sharpness:
                 logger.warning(
                     "Window %d: best frame sharpness %.1f below minimum %.1f, skipping",
-                    window_idx, sharp, MIN_SHARPNESS,
+                    window_idx, sharp, min_sharpness,
                 )
             else:
                 out_path = output_dir / f"frame_{window_idx:04d}.jpg"
