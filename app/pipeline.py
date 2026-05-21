@@ -163,6 +163,9 @@ async def _process_one(
             is_hit, reason = hit_watchlist.match(card, s)
             card.is_hit_watchlist = is_hit
             card.hit_reason = reason
+            # Flag cards above threshold for photo retake (useful for video-sourced scans)
+            if card.est_value_raw and card.est_value_raw >= settings.video_retake_photo_threshold:
+                card.needs_photo_verification = True
             s.add(card); s.commit(); s.refresh(card)
 
             achievements.record_daily_activity(s)
@@ -406,3 +409,41 @@ async def _run_drive_job(job_id: int, all_files, initial_pairs, folders, api_key
         j = s.get(models.ScanJob, job_id)
         j.status = "done"; j.finished_at = datetime.utcnow()
         s.add(j)
+
+
+async def run_job_paired(job_id: int, pairs: list, api_key_override: Optional[str]) -> None:
+    """Process pre-paired images (from video extraction). Skips auto_pair."""
+    from app.services.auto_pair import Pair
+    from app.services.video_pair import PairedCard
+
+    # Convert PairedCard to Pair for the worker
+    pipeline_pairs = [Pair(front=p.front, back=p.back) for p in pairs]
+
+    with session_scope() as s:
+        job = s.get(models.ScanJob, job_id)
+        job.status = "processing"
+        job.started_at = datetime.utcnow()
+        job.total = len(pipeline_pairs)
+        s.add(job)
+
+    sem = asyncio.Semaphore(3)
+
+    async def worker(pair) -> dict:
+        async with sem:
+            res = await _process_one(pair.front, api_key_override,
+                                      back_path=pair.back, job_id=job_id)
+            with session_scope() as s:
+                job = s.get(models.ScanJob, job_id)
+                job.processed += 1
+                if not res.get("ok"):
+                    job.failed += 1
+                s.add(job)
+            return res
+
+    await asyncio.gather(*(worker(p) for p in pipeline_pairs))
+
+    with session_scope() as s:
+        job = s.get(models.ScanJob, job_id)
+        job.status = "done"
+        job.finished_at = datetime.utcnow()
+        s.add(job)

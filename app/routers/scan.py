@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import shutil
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -11,8 +13,13 @@ from fastapi import APIRouter, BackgroundTasks, File, Header, HTTPException, Upl
 from sqlmodel import Session, select
 
 from app import models, pipeline
-from app.config import UPLOAD_DIR
+from app.config import UPLOAD_DIR, settings
 from app.db import get_engine
+from app.models import ScanJob
+from app.services.video_extract import extract_frames
+from app.services.video_pair import classify_sides, pair_frames
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -44,6 +51,109 @@ async def upload(
 
     asyncio.create_task(pipeline.run_job(job_id, saved, x_anthropic_key))
     return {"job_id": job_id, "queued": len(saved)}
+
+
+VIDEO_EXTENSIONS = {".mov", ".mp4", ".m4v"}
+VIDEO_TMP_DIR = Path("/data/video-tmp")
+
+
+@router.post("/scans/upload-video")
+async def upload_video(
+    file: UploadFile = File(...),
+    label: Optional[str] = None,
+    x_anthropic_key: Optional[str] = Header(default=None),
+) -> dict:
+    """Upload a video of cards for scanning.
+
+    Extracts clear frames, pairs front/back, and feeds into the scan pipeline.
+    """
+    suffix = Path(file.filename or "video.mp4").suffix.lower()
+    if suffix not in VIDEO_EXTENSIONS:
+        raise HTTPException(400, f"Unsupported format {suffix}. Use .mov, .mp4, or .m4v")
+
+    max_bytes = settings.video_max_upload_mb * 1024 * 1024
+    VIDEO_TMP_DIR.mkdir(parents=True, exist_ok=True)
+    video_path = VIDEO_TMP_DIR / f"{uuid.uuid4().hex}{suffix}"
+
+    # Stream to disk to avoid loading entire video into memory
+    size = 0
+    with open(video_path, "wb") as f:
+        while chunk := await file.read(1024 * 1024):
+            size += len(chunk)
+            if size > max_bytes:
+                video_path.unlink(missing_ok=True)
+                raise HTTPException(413, f"Video exceeds {settings.video_max_upload_mb}MB limit")
+            f.write(chunk)
+
+    # Create job
+    job = ScanJob(label=label or "Video scan", source="video", status="queued")
+    with Session(get_engine()) as s:
+        s.add(job)
+        s.commit()
+        s.refresh(job)
+        job_id = job.id
+
+    asyncio.create_task(_process_video(job_id, video_path, x_anthropic_key))
+    return {"job_id": job_id, "source": "video"}
+
+
+async def _process_video(
+    job_id: int, video_path: Path, api_key_override: Optional[str]
+) -> None:
+    """Background task: extract frames from video, pair, then run scan pipeline."""
+    from app.pipeline import run_job_paired
+
+    try:
+        # Update job status
+        with Session(get_engine()) as s:
+            job = s.get(ScanJob, job_id)
+            job.status = "processing"
+            s.commit()
+
+        # Extract frames
+        def on_progress(stage, current, total):
+            with Session(get_engine()) as s:
+                job = s.get(ScanJob, job_id)
+                if stage == "extracting":
+                    job.extraction_total = total
+                    job.extraction_done = current
+                s.commit()
+
+        frames = extract_frames(video_path, on_progress=on_progress)
+
+        if not frames:
+            with Session(get_engine()) as s:
+                job = s.get(ScanJob, job_id)
+                job.status = "error"
+                job.finished_at = datetime.utcnow()
+                s.commit()
+            return
+
+        # Classify front/back
+        sides = await classify_sides(frames)
+        pairs = pair_frames(frames, sides)
+
+        # Update job total (number of cards, not frames)
+        with Session(get_engine()) as s:
+            job = s.get(ScanJob, job_id)
+            job.total = len(pairs)
+            job.extraction_total = len(frames)
+            job.extraction_done = len(frames)
+            s.commit()
+
+        # Hand off to existing pipeline — use run_job_paired to skip auto_pair
+        await run_job_paired(job_id, pairs, api_key_override)
+
+    except Exception:
+        logger.exception("Video processing failed for job %d", job_id)
+        with Session(get_engine()) as s:
+            job = s.get(ScanJob, job_id)
+            job.status = "error"
+            job.finished_at = datetime.utcnow()
+            s.commit()
+    finally:
+        # Clean up temp video
+        video_path.unlink(missing_ok=True)
 
 
 @router.get("/scans/jobs/{job_id}")
