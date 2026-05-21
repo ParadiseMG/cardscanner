@@ -595,9 +595,15 @@ async def reprice_all_unpriced() -> dict:
     """Retry comp lookup for all cards missing pricing data."""
     from app.services import comp_lookup as _comp
 
+    from sqlalchemy import or_
     with Session(get_engine()) as s:
         unpriced = s.exec(
-            select(models.Card).where(models.Card.comp_fetched_at.is_(None))
+            select(models.Card).where(
+                or_(
+                    models.Card.comp_fetched_at.is_(None),
+                    models.Card.comp_median.is_(None),
+                )
+            )
         ).all()
         card_ids = [c.id for c in unpriced]
 
