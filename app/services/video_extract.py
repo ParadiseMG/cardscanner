@@ -24,6 +24,23 @@ def sharpness_score(gray: np.ndarray) -> float:
     return cv2.Laplacian(gray, cv2.CV_64F).var()
 
 
+def adaptive_threshold(scores: np.ndarray) -> float:
+    """Derive a motion threshold from the score distribution itself.
+
+    Card-scanning videos are bimodal: low scores while holding a card
+    still, high scores during flips/transitions. The threshold sits
+    between the two clusters, computed as median + 1.5 * IQR (classic
+    outlier fence). Falls back to the config value as a floor.
+    """
+    median = float(np.median(scores))
+    q25, q75 = float(np.percentile(scores, 25)), float(np.percentile(scores, 75))
+    iqr = q75 - q25
+    derived = median + 1.5 * iqr
+    # Don't go below a sensible floor — avoids nonsense on very still videos
+    floor = max(settings.video_motion_threshold, 2.0)
+    return max(derived, floor)
+
+
 def find_still_windows(
     motion_scores: list[float],
     threshold: float = 50.0,
@@ -50,6 +67,27 @@ def find_still_windows(
         windows.append((start, len(motion_scores) - 1))
 
     return windows
+
+
+def merge_nearby_windows(
+    windows: list[tuple[int, int]],
+    min_gap_frames: int = 15,
+) -> list[tuple[int, int]]:
+    """Merge windows separated by fewer than min_gap_frames.
+
+    Fixes fragmentation where one hold gets split by a momentary
+    tremor spike.
+    """
+    if not windows:
+        return windows
+    merged = [windows[0]]
+    for start, end in windows[1:]:
+        prev_start, prev_end = merged[-1]
+        if start - prev_end <= min_gap_frames:
+            merged[-1] = (prev_start, end)
+        else:
+            merged.append((start, end))
+    return merged
 
 
 def pick_best_frame(frames: list[np.ndarray]) -> int:
@@ -91,9 +129,11 @@ def extract_frames(video_path: Path, on_progress: Optional[callable] = None) -> 
     if on_progress:
         on_progress("reading", 0, total_frames)
 
-    # Pass 1: compute motion scores at low resolution
+    # Pass 1: compute motion scores using HSV content differencing
+    # HSV is more robust than grayscale — lighting changes mostly affect
+    # value (brightness), while card transitions change hue and saturation.
     motion_scores: list[float] = []
-    prev_gray: Optional[np.ndarray] = None
+    prev_hsv: Optional[np.ndarray] = None
     frame_idx = 0
 
     while True:
@@ -104,15 +144,17 @@ def extract_frames(video_path: Path, on_progress: Optional[callable] = None) -> 
         h, w = frame.shape[:2]
         scale = DOWNSCALE_WIDTH / w
         small = cv2.resize(frame, (DOWNSCALE_WIDTH, int(h * scale)))
-        gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+        hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV).astype(np.float32)
 
-        if prev_gray is not None:
-            diff = cv2.absdiff(gray, prev_gray)
-            motion_scores.append(float(diff.sum()) / diff.size)
+        if prev_hsv is not None:
+            diff = np.abs(hsv - prev_hsv)
+            # Weight: hue and saturation matter most, brightness least
+            weighted = diff[:, :, 0] * 1.0 + diff[:, :, 1] * 1.0 + diff[:, :, 2] * 0.5
+            motion_scores.append(float(weighted.sum()) / weighted.size)
         else:
             motion_scores.append(0.0)
 
-        prev_gray = gray
+        prev_hsv = hsv
         frame_idx += 1
 
         if on_progress and frame_idx % 100 == 0:
@@ -123,28 +165,33 @@ def extract_frames(video_path: Path, on_progress: Optional[callable] = None) -> 
     if not motion_scores:
         raise ValueError("Video contains no frames")
 
-    # Diagnostic: log motion score distribution so we can tune thresholds
+    # Adaptive threshold: derive from this video's own score distribution
     scores_arr = np.array(motion_scores)
+    threshold = adaptive_threshold(scores_arr)
+
     logger.info(
-        "Motion scores — min=%.1f median=%.1f p75=%.1f p90=%.1f max=%.1f threshold=%.1f",
+        "Motion scores (HSV) — min=%.1f median=%.1f p75=%.1f p90=%.1f max=%.1f | adaptive_threshold=%.1f",
         float(np.min(scores_arr)), float(np.median(scores_arr)),
         float(np.percentile(scores_arr, 75)), float(np.percentile(scores_arr, 90)),
-        float(np.max(scores_arr)), motion_threshold,
+        float(np.max(scores_arr)), threshold,
     )
 
-    # Find still windows
-    windows = find_still_windows(motion_scores, motion_threshold, min_still_frames)
+    # Find still windows, then merge nearby ones (fixes fragmentation from tremor)
+    merge_gap = max(int(fps * 0.3), 5)  # merge windows within 0.3s of each other
+    windows = find_still_windows(motion_scores, threshold, min_still_frames)
+    pre_merge_count = len(windows)
+    windows = merge_nearby_windows(windows, merge_gap)
 
     if not windows:
         raise ValueError(
             "No cards detected — no still moments found. "
-            "Try holding each card still for about a moment. "
-            f"(threshold={motion_threshold}, min_frames={min_still_frames}, "
+            "Try holding each card still for about a second. "
+            f"(threshold={threshold:.1f}, min_frames={min_still_frames}, "
             f"median_motion={float(np.median(scores_arr)):.1f})"
         )
 
-    logger.info("Found %d still windows in %d frames (%.1f fps, threshold=%.1f, min_still=%d)",
-                len(windows), total_frames, fps, motion_threshold, min_still_frames)
+    logger.info("Found %d still windows (%d before merge) in %d frames (%.1f fps, threshold=%.1f, min_still=%d)",
+                len(windows), pre_merge_count, total_frames, fps, threshold, min_still_frames)
 
     if on_progress:
         on_progress("extracting", 0, len(windows))

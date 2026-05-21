@@ -8,6 +8,8 @@ from unittest.mock import patch, MagicMock
 from app.services.video_extract import (
     sharpness_score,
     find_still_windows,
+    merge_nearby_windows,
+    adaptive_threshold,
     pick_best_frame,
 )
 
@@ -47,6 +49,35 @@ def test_find_still_windows_too_short():
     scores = [500.0] * 5 + [10.0] * 5 + [500.0] * 5
     windows = find_still_windows(scores, threshold=50.0, min_frames=10)
     assert len(windows) == 0
+
+
+def test_merge_nearby_windows_combines_close():
+    """Windows within the gap threshold merge into one."""
+    windows = [(5, 20), (25, 40), (80, 95)]
+    merged = merge_nearby_windows(windows, min_gap_frames=10)
+    assert len(merged) == 2
+    assert merged[0] == (5, 40)   # first two merged
+    assert merged[1] == (80, 95)  # third stays separate
+
+
+def test_merge_nearby_windows_leaves_distant():
+    """Well-separated windows stay separate."""
+    windows = [(0, 20), (50, 70), (100, 120)]
+    merged = merge_nearby_windows(windows, min_gap_frames=10)
+    assert len(merged) == 3
+
+
+def test_adaptive_threshold_bimodal():
+    """Threshold lands between the still cluster and the motion cluster."""
+    # Simulate: 80% still (scores 1-3), 20% transitions (scores 15-25)
+    still = np.random.uniform(1.0, 3.0, 800)
+    motion = np.random.uniform(15.0, 25.0, 200)
+    scores = np.concatenate([still, motion])
+    np.random.shuffle(scores)
+    thresh = adaptive_threshold(scores)
+    # Should be well above the still cluster but below the motion cluster
+    assert thresh > 3.0
+    assert thresh < 15.0
 
 
 def test_pick_best_frame_returns_sharpest():
