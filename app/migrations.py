@@ -272,6 +272,21 @@ def m11_scanjob_storage(engine: Engine) -> None:
                 ))
 
 
+def m12_video_scanning(engine: Engine) -> None:
+    """Add source/extraction progress columns to scanjob for video scanning support."""
+    with engine.connect() as conn:
+        for col, typedef in [
+            ("source", "TEXT DEFAULT 'photo'"),
+            ("extraction_total", "INTEGER"),
+            ("extraction_done", "INTEGER"),
+        ]:
+            try:
+                conn.execute(text(f"ALTER TABLE scanjob ADD COLUMN {col} {typedef}"))
+            except Exception:
+                pass
+        conn.commit()
+
+
 MIGRATIONS: list[tuple[int, str, Callable[[Engine], None]]] = [
     (1, "baseline", m1_baseline),
     (2, "add card year/player index", m2_add_card_indexes),
@@ -284,6 +299,7 @@ MIGRATIONS: list[tuple[int, str, Callable[[Engine], None]]] = [
     (9, "job failures table", m9_job_failures),
     (10, "storage locations table + card columns", m10_storage_locations),
     (11, "per-scanjob storage tag", m11_scanjob_storage),
+    (12, "video scanning fields on scanjob", m12_video_scanning),
 ]
 
 

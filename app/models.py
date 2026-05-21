@@ -157,6 +157,9 @@ class ScanJob(SQLModel, table=True):
     # came from <location>" — every Card the job creates inherits these.
     storage_location_id: Optional[int] = None
     storage_position: Optional[str] = None
+    source: str = "photo"  # "photo" or "video"
+    extraction_total: Optional[int] = None
+    extraction_done: Optional[int] = None
 
 
 # ---------------------------------------------------------------------------
