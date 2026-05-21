@@ -13,25 +13,85 @@
 </head>
 <body class="bg-slate-950 text-slate-100 min-h-screen">
 
-<div x-data="cardscanner()" x-init="init()" class="max-w-7xl mx-auto px-6 py-6">
+<div x-data="cardscanner()" x-init="init()" class="max-w-7xl mx-auto px-4 py-4 md:px-6 md:py-6">
 
   <!-- header -->
   <header class="flex items-center justify-between mb-6">
     <div class="flex items-center gap-3">
       <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-fuchsia-500 to-amber-400 grid place-items-center font-black text-slate-900 text-xl">D</div>
       <div>
-        <h1 class="text-2xl font-bold tracking-tight">CardScanner <span class="text-xs font-medium text-slate-400">by Danu</span></h1>
-        <p class="text-xs text-slate-400">Drop card photos → auto-identify → comp lookup → eBay-ready listings</p>
+        <h1 class="text-2xl font-bold tracking-tight">CardScanner <span class="text-xs font-medium text-slate-400 hidden md:inline">by Danu</span></h1>
+        <p class="text-xs text-slate-400 hidden md:block">Drop card photos → auto-identify → comp lookup → eBay-ready listings</p>
       </div>
     </div>
-    <div class="flex items-center gap-3 text-sm">
+    <div class="hidden md:flex items-center gap-3 text-sm">
       <span class="px-2 py-1 rounded bg-slate-800" x-text="'Streak: '+(stats.streak_days||0)+'d 🔥'"></span>
       <button @click="openSettings=true" class="px-3 py-1.5 rounded bg-slate-800 hover:bg-slate-700 focus:outline-none focus:ring-2 focus:ring-fuchsia-500">⚙︎ Settings</button>
     </div>
+    <!-- mobile settings gear -->
+    <button @click="openSettings=true" class="md:hidden px-2 py-1.5 rounded bg-slate-800 hover:bg-slate-700 text-sm">⚙︎</button>
   </header>
 
-  <!-- tabs -->
-  <nav class="flex gap-1 mb-0 border-b border-slate-800">
+  <!-- ============================================================ MOBILE UPLOAD HERO -->
+  <!-- On small screens: prominent upload zone + progress, nothing else -->
+  <div class="md:hidden mb-4" x-show="tab==='Dashboard'">
+    <div class="rounded-2xl border-2 border-dashed border-slate-700 hover:border-fuchsia-500 active:border-fuchsia-400 transition-all p-8"
+         @dragover.prevent="dragOver=true" @dragleave.prevent="dragOver=false"
+         @drop.prevent="onDrop($event)" :class="dragOver ? 'border-fuchsia-400 bg-slate-900' : ''">
+      <div class="text-center">
+        <div class="text-5xl mb-3">🎴</div>
+        <p class="text-base text-slate-300 font-medium mb-1">Scan cards</p>
+        <p class="text-xs text-slate-500 mb-4">Photos or video of your stack</p>
+        <label class="inline-block px-6 py-3 rounded-xl bg-gradient-to-r from-fuchsia-600 to-amber-500 hover:from-fuchsia-500 hover:to-amber-400 cursor-pointer text-sm font-semibold text-white">
+          Choose files
+          <input type="file" multiple accept="image/*,video/mp4,video/quicktime,video/x-m4v,.mov,.mp4,.m4v" class="hidden" @change="onFiles($event.target.files)">
+        </label>
+      </div>
+    </div>
+    <!-- mobile progress -->
+    <template x-if="job">
+      <div class="mt-4 rounded-xl bg-slate-900 border border-fuchsia-500/40 p-4">
+        <div class="flex justify-between text-xs text-slate-400 mb-1">
+          <span x-text="job.label || 'Processing'"></span>
+          <template x-if="job.source === 'video' && job.extraction_total && job.extraction_done < job.extraction_total">
+            <span x-text="job.extraction_done+'/'+job.extraction_total+' frames'"></span>
+          </template>
+          <template x-if="!(job.source === 'video' && job.extraction_total && job.extraction_done < job.extraction_total)">
+            <span x-text="job.processed+'/'+job.total+' cards'"></span>
+          </template>
+        </div>
+        <div class="h-3 bg-slate-800 rounded-full overflow-hidden">
+          <div class="h-full bg-gradient-to-r from-fuchsia-500 to-amber-400 transition-all"
+               :style="'width:'+( job.source === 'video' && job.extraction_total && job.extraction_done < job.extraction_total
+                 ? (job.extraction_done/job.extraction_total*100)
+                 : (job.total ? (job.processed/job.total*100) : 0) )+'%'"></div>
+        </div>
+        <div class="text-xs text-slate-400 mt-2 text-center"
+             x-text="job.status==='done' ? '✓ Done! '+(job.processed||0)+' cards scanned'+(job.failed?' ('+job.failed+' failed)':'')
+                     : job.source==='video' && job.extraction_total && job.extraction_done < job.extraction_total
+                       ? 'Extracting frames from video...'
+                       : 'Identifying & looking up comps...'"></div>
+      </div>
+    </template>
+    <!-- mobile quick stats -->
+    <div class="mt-4 flex gap-3 text-center">
+      <div class="flex-1 rounded-xl bg-slate-900 border border-slate-800 p-3">
+        <div class="text-xl font-bold" x-text="stats.total_cards||0"></div>
+        <div class="text-[10px] text-slate-500 uppercase">Cards</div>
+      </div>
+      <div class="flex-1 rounded-xl bg-slate-900 border border-slate-800 p-3">
+        <div class="text-xl font-bold text-emerald-300" x-text="'$'+formatNum(stats.total_value||0)"></div>
+        <div class="text-[10px] text-slate-500 uppercase">Value</div>
+      </div>
+      <div class="flex-1 rounded-xl bg-slate-900 border border-slate-800 p-3">
+        <div class="text-xl font-bold" x-text="(stats.streak_days||0)+'🔥'"></div>
+        <div class="text-[10px] text-slate-500 uppercase">Streak</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- tabs (hidden on mobile — just the upload zone there) -->
+  <nav class="hidden md:flex gap-1 mb-0 border-b border-slate-800">
     <template x-for="t in ['Dashboard','Inventory','Suggestions','Listings','Money','Achievements']" :key="t">
       <button @click="tab=t; if(t==='Inventory') onInventoryTabEnter(); if(t==='Suggestions') loadSuggestions(); if(t==='Money') onMoneyTabEnter()"
               :class="tab===t ? 'text-fuchsia-300 border-b-2 border-fuchsia-400' : 'text-slate-400 hover:text-slate-200'"
@@ -46,8 +106,8 @@
   </nav>
 
   <!-- ============================================================ B5: ACTIVITY STRIPE -->
-  <!-- Persistent stripe between tabs and content — always visible -->
-  <div class="relative border-b border-slate-800 overflow-hidden" style="min-height:36px">
+  <!-- Persistent stripe between tabs and content — hidden on mobile -->
+  <div class="hidden md:block relative border-b border-slate-800 overflow-hidden" style="min-height:36px">
     <!-- Job progress bar (layered behind stripe text) -->
     <template x-if="job && job.status !== 'done'">
       <div class="absolute inset-0 h-full bg-gradient-to-r from-fuchsia-900/60 to-amber-900/40 transition-all"
@@ -87,8 +147,8 @@
   <!-- ============================================================ DASHBOARD -->
   <section x-show="tab==='Dashboard'" x-transition class="mt-4">
 
-    <!-- stat cards -->
-    <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
+    <!-- stat cards (hidden on mobile — compact stats shown in mobile hero) -->
+    <div class="hidden md:grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
       <div class="rounded-xl bg-slate-900 border border-slate-800 p-4">
         <div class="text-xs text-slate-400 uppercase tracking-wide">Total cards</div>
         <div class="text-3xl font-bold mt-1" x-text="stats.total_cards||0"></div>
@@ -113,8 +173,8 @@
       </div>
     </div>
 
-    <!-- Drive inbox -->
-    <div class="rounded-2xl bg-gradient-to-br from-slate-900 to-slate-950 border border-slate-800 p-6 mb-4">
+    <!-- Drive inbox (hidden on mobile) -->
+    <div class="hidden md:block rounded-2xl bg-gradient-to-br from-slate-900 to-slate-950 border border-slate-800 p-6 mb-4">
       <div class="flex items-center justify-between">
         <div>
           <h2 class="text-lg font-semibold">📂 Drive inbox</h2>
@@ -139,8 +199,8 @@
       </div>
     </div>
 
-    <!-- upload zone (fallback) -->
-    <details class="rounded-xl bg-slate-900/50 border border-slate-800 p-4 mb-6">
+    <!-- upload zone (fallback — hidden on mobile, mobile hero handles it) -->
+    <details class="hidden md:block rounded-xl bg-slate-900/50 border border-slate-800 p-4 mb-6">
       <summary class="cursor-pointer text-sm text-slate-400 hover:text-slate-200">📎 Or upload files directly (fallback)</summary>
       <div class="mt-4 rounded-2xl border-2 border-dashed border-slate-700 hover:border-fuchsia-500 transition-all p-6"
            @dragover.prevent="dragOver=true" @dragleave.prevent="dragOver=false"
@@ -158,9 +218,9 @@
       </div>
     </details>
 
-    <!-- progress (Dashboard tab — kept for backwards compat) -->
+    <!-- progress (Dashboard tab — desktop only, mobile has its own in hero) -->
     <template x-if="job">
-      <div class="mb-6 rounded-xl bg-slate-900 border border-fuchsia-500/40 p-4 max-w-2xl mx-auto">
+      <div class="hidden md:block mb-6 rounded-xl bg-slate-900 border border-fuchsia-500/40 p-4 max-w-2xl mx-auto">
         <div class="flex justify-between text-xs text-slate-400 mb-1">
           <span x-text="job.label || 'Processing batch'"></span>
           <template x-if="job.source === 'video' && job.extraction_total && job.extraction_done < job.extraction_total">
@@ -184,8 +244,8 @@
       </div>
     </template>
 
-    <!-- insights + action queue -->
-    <div class="grid md:grid-cols-3 gap-4 mb-6">
+    <!-- insights + action queue (hidden on mobile) -->
+    <div class="hidden md:grid md:grid-cols-3 gap-4 mb-6">
       <div class="md:col-span-2 rounded-xl bg-slate-900 border border-slate-800 p-4">
         <h3 class="font-semibold mb-3">💡 Smart insights</h3>
         <template x-if="!insights.length"><p class="text-sm text-slate-500">Add a few cards and your insights will start showing up here.</p></template>
@@ -249,8 +309,8 @@
       </div>
     </template>
 
-    <!-- charts -->
-    <div class="grid md:grid-cols-2 gap-4 mb-6">
+    <!-- charts (hidden on mobile) -->
+    <div class="hidden md:grid md:grid-cols-2 gap-4 mb-6">
       <div class="rounded-xl bg-slate-900 border border-slate-800 p-4">
         <h3 class="font-semibold mb-3">Era distribution</h3>
         <canvas id="eraChart" height="180"></canvas>
@@ -261,8 +321,8 @@
       </div>
     </div>
 
-    <!-- recent scans -->
-    <div class="rounded-xl bg-slate-900 border border-slate-800 p-4">
+    <!-- recent scans (hidden on mobile) -->
+    <div class="hidden md:block rounded-xl bg-slate-900 border border-slate-800 p-4">
       <div class="flex justify-between items-center mb-3">
         <h3 class="font-semibold">Recent scans</h3>
         <button @click="loadRecent()" class="text-xs text-slate-400 hover:text-slate-200 focus:outline-none focus:ring-1 focus:ring-fuchsia-500">refresh</button>
