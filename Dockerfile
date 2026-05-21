@@ -7,7 +7,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libdbus-1-3 libxkbcommon0 libatspi2.0-0 libxcomposite1 libxdamage1 \
     libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2 \
     libx11-xcb1 \
-    xvfb \
+    xvfb xauth \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
