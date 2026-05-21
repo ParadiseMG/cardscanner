@@ -18,6 +18,13 @@ services:
       - CARDSCANNER_PW_HEADLESS=1
       - CARDSCANNER_PW_PROFILE=/data/playwright-profile
       - HOST=0.0.0.0
+      - VISION_BACKEND=${VISION_BACKEND:-ollama}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      - OLLAMA_VISION_MODEL=${OLLAMA_VISION_MODEL:-llama3.2-vision:11b}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - ANTHROPIC_MODEL=${ANTHROPIC_MODEL:-}
+      - NTFY_TOPIC=${NTFY_TOPIC:-}
+      - NTFY_SERVER=${NTFY_SERVER:-https://ntfy.sh}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     healthcheck:
