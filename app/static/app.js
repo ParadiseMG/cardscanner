@@ -957,14 +957,33 @@ function cardscanner() {
 
     async uploadFiles(files) {
       if (!files || !files.length) return;
-      const fd = new FormData();
-      for (const f of files) fd.append('files', f);
-      fd.append('label', `Batch of ${files.length}`);
+
+      // Check if any file is a video
+      const videoFile = Array.from(files).find(f =>
+        /\.(mov|mp4|m4v)$/i.test(f.name) || f.type.startsWith('video/')
+      );
+
       const headers = {};
       const key = localStorage.getItem('anthropic_key');
       if (key) headers['X-Anthropic-Key'] = key;
-      const res = await fetch('/api/scans/upload', { method: 'POST', body: fd, headers }).then(r => r.json());
-      this.job = { id: res.job_id, total: res.queued, processed: 0, status: 'queued' };
+
+      if (videoFile) {
+        // Video upload — single file to video endpoint
+        const fd = new FormData();
+        fd.append('file', videoFile);
+        fd.append('label', `Video scan`);
+        const res = await fetch('/api/scans/upload-video', { method: 'POST', body: fd, headers }).then(r => r.json());
+        if (res.error || res.detail) { alert(res.detail || res.error); return; }
+        this.job = { id: res.job_id, total: 0, processed: 0, status: 'queued', source: 'video' };
+      } else {
+        // Photo upload — existing behavior
+        const fd = new FormData();
+        for (const f of files) fd.append('files', f);
+        fd.append('label', `Batch of ${files.length}`);
+        const res = await fetch('/api/scans/upload', { method: 'POST', body: fd, headers }).then(r => r.json());
+        this.job = { id: res.job_id, total: res.queued, processed: 0, status: 'queued', source: 'photo' };
+      }
+
       if (this.jobPoll) clearInterval(this.jobPoll);
       this.jobPoll = setInterval(() => this.pollJob(), 1500);
     },

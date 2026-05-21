@@ -169,6 +169,9 @@ def job_status(job_id: int) -> dict:
             "processed": job.processed,
             "failed": job.failed,
             "label": job.label,
+            "source": job.source,
+            "extraction_total": job.extraction_total,
+            "extraction_done": job.extraction_done,
             "started_at": job.started_at.isoformat() if job.started_at else None,
             "finished_at": job.finished_at.isoformat() if job.finished_at else None,
         }
@@ -180,7 +183,7 @@ def list_jobs() -> list[dict]:
         jobs = s.exec(select(models.ScanJob).order_by(models.ScanJob.id.desc()).limit(20)).all()
         return [
             {"id": j.id, "status": j.status, "total": j.total, "processed": j.processed,
-             "failed": j.failed, "label": j.label,
+             "failed": j.failed, "label": j.label, "source": j.source,
              "started_at": j.started_at.isoformat() if j.started_at else None,
              "finished_at": j.finished_at.isoformat() if j.finished_at else None}
             for j in jobs
