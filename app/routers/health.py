@@ -62,12 +62,25 @@ async def _check_ebay() -> dict:
 
 
 async def _check_claude() -> dict:
-    """Report active backend (cli/http) and a basic reachability check."""
+    """Report active backend (ollama/cli/http) and a basic reachability check."""
     backend = claude_vision.active_backend()
     cli_avail = claude_vision.cli_available()
 
+    if backend == "ollama":
+        url = settings.ollama_base_url.rstrip("/")
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                r = await client.get(f"{url}/api/tags", timeout=5.0)
+                models = [m["name"] for m in r.json().get("models", [])]
+                has_model = any(settings.ollama_vision_model in m for m in models)
+                return {"ok": has_model, "backend": "ollama",
+                        "url": url, "model": settings.ollama_vision_model,
+                        "model_available": has_model, "models": models}
+        except Exception as e:
+            return {"ok": False, "backend": "ollama", "url": url,
+                    "error": str(e)}
+
     if backend == "cli":
-        # Don't actually invoke claude — just confirm the binary resolves.
         return {"ok": cli_avail, "backend": "cli", "cli_available": cli_avail}
 
     # HTTP backend — confirm a key is set and api.anthropic.com is reachable
