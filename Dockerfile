@@ -20,7 +20,7 @@ RUN playwright install chromium
 COPY . .
 
 # Persistent data lives in a mounted volume
-RUN mkdir -p /data
+RUN mkdir -p /data /data/video-tmp
 
 ENV CARDSCANNER_PW_HEADLESS=1
 ENV HOST=0.0.0.0
