@@ -50,6 +50,10 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://100.71.106.53:11434"
     ollama_vision_model: str = "llama3.2-vision:11b"
 
+    # Video scanning
+    video_retake_photo_threshold: float = 10.0  # suggest retaking photos above this value
+    video_max_upload_mb: int = 500
+
     # Captcha notification (ntfy.sh push notification when captcha detected)
     ntfy_topic: str = ""  # e.g. "cardscanner-connor" — leave blank to disable
     ntfy_server: str = "https://ntfy.sh"
