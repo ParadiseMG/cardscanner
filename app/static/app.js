@@ -968,20 +968,34 @@ function cardscanner() {
       if (key) headers['X-Anthropic-Key'] = key;
 
       if (videoFile) {
+        // Show uploading state immediately
+        const sizeMB = (videoFile.size / 1024 / 1024).toFixed(1);
+        this.job = { status: 'uploading', source: 'video', label: `Uploading video (${sizeMB} MB)...`, total: 0, processed: 0 };
+
         // Video upload — single file to video endpoint
         const fd = new FormData();
         fd.append('file', videoFile);
         fd.append('label', `Video scan`);
-        const res = await fetch('/api/scans/upload-video', { method: 'POST', body: fd, headers }).then(r => r.json());
-        if (res.error || res.detail) { alert(res.detail || res.error); return; }
-        this.job = { id: res.job_id, total: 0, processed: 0, status: 'queued', source: 'video' };
+        try {
+          const res = await fetch('/api/scans/upload-video', { method: 'POST', body: fd, headers }).then(r => r.json());
+          if (res.error || res.detail) { this.job = null; alert(res.detail || res.error); return; }
+          this.job = { id: res.job_id, total: 0, processed: 0, status: 'queued', source: 'video', label: 'Video scan' };
+        } catch (e) {
+          this.job = null; alert('Upload failed: ' + e.message); return;
+        }
       } else {
-        // Photo upload — existing behavior
+        // Show uploading state
+        this.job = { status: 'uploading', source: 'photo', label: `Uploading ${files.length} photo(s)...`, total: 0, processed: 0 };
+
         const fd = new FormData();
         for (const f of files) fd.append('files', f);
         fd.append('label', `Batch of ${files.length}`);
-        const res = await fetch('/api/scans/upload', { method: 'POST', body: fd, headers }).then(r => r.json());
-        this.job = { id: res.job_id, total: res.queued, processed: 0, status: 'queued', source: 'photo' };
+        try {
+          const res = await fetch('/api/scans/upload', { method: 'POST', body: fd, headers }).then(r => r.json());
+          this.job = { id: res.job_id, total: res.queued, processed: 0, status: 'queued', source: 'photo', label: `Batch of ${files.length}` };
+        } catch (e) {
+          this.job = null; alert('Upload failed: ' + e.message); return;
+        }
       }
 
       if (this.jobPoll) clearInterval(this.jobPoll);

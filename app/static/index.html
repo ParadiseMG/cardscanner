@@ -51,26 +51,52 @@
     <!-- mobile progress -->
     <template x-if="job">
       <div class="mt-4 rounded-xl bg-slate-900 border border-fuchsia-500/40 p-4">
-        <div class="flex justify-between text-xs text-slate-400 mb-1">
-          <span x-text="job.label || 'Processing'"></span>
-          <template x-if="job.source === 'video' && job.extraction_total && job.extraction_done < job.extraction_total">
-            <span x-text="job.extraction_done+'/'+job.extraction_total+' frames'"></span>
-          </template>
-          <template x-if="!(job.source === 'video' && job.extraction_total && job.extraction_done < job.extraction_total)">
-            <span x-text="job.processed+'/'+job.total+' cards'"></span>
-          </template>
-        </div>
-        <div class="h-3 bg-slate-800 rounded-full overflow-hidden">
-          <div class="h-full bg-gradient-to-r from-fuchsia-500 to-amber-400 transition-all"
-               :style="'width:'+( job.source === 'video' && job.extraction_total && job.extraction_done < job.extraction_total
-                 ? (job.extraction_done/job.extraction_total*100)
-                 : (job.total ? (job.processed/job.total*100) : 0) )+'%'"></div>
-        </div>
-        <div class="text-xs text-slate-400 mt-2 text-center"
-             x-text="job.status==='done' ? '✓ Done! '+(job.processed||0)+' cards scanned'+(job.failed?' ('+job.failed+' failed)':'')
-                     : job.source==='video' && job.extraction_total && job.extraction_done < job.extraction_total
-                       ? 'Extracting frames from video...'
-                       : 'Identifying & looking up comps...'"></div>
+        <!-- uploading phase -->
+        <template x-if="job.status === 'uploading'">
+          <div>
+            <div class="flex items-center gap-2 mb-2">
+              <div class="w-4 h-4 border-2 border-fuchsia-400 border-t-transparent rounded-full animate-spin"></div>
+              <span class="text-sm text-slate-300" x-text="job.label"></span>
+            </div>
+            <div class="h-2 bg-slate-800 rounded-full overflow-hidden">
+              <div class="h-full bg-fuchsia-500/60 rounded-full animate-pulse" style="width:100%"></div>
+            </div>
+          </div>
+        </template>
+        <!-- queued / processing / done phases -->
+        <template x-if="job.status !== 'uploading'">
+          <div>
+            <div class="flex justify-between text-xs text-slate-400 mb-1">
+              <span x-text="job.label || 'Processing'"></span>
+              <template x-if="job.source === 'video' && job.extraction_total && job.extraction_done < job.extraction_total">
+                <span x-text="job.extraction_done+'/'+job.extraction_total+' frames'"></span>
+              </template>
+              <template x-if="!(job.source === 'video' && job.extraction_total && job.extraction_done < job.extraction_total) && job.total > 0">
+                <span x-text="job.processed+'/'+job.total+' cards'"></span>
+              </template>
+            </div>
+            <div class="h-3 bg-slate-800 rounded-full overflow-hidden">
+              <template x-if="job.status === 'queued' || (job.source === 'video' && !job.extraction_total)">
+                <div class="h-full bg-fuchsia-500/60 rounded-full animate-pulse" style="width:100%"></div>
+              </template>
+              <template x-if="!(job.status === 'queued' || (job.source === 'video' && !job.extraction_total))">
+                <div class="h-full bg-gradient-to-r from-fuchsia-500 to-amber-400 transition-all"
+                     :style="'width:'+( job.source === 'video' && job.extraction_total && job.extraction_done < job.extraction_total
+                       ? (job.extraction_done/job.extraction_total*100)
+                       : (job.total ? (job.processed/job.total*100) : 0) )+'%'"></div>
+              </template>
+            </div>
+            <div class="text-sm mt-3 text-center"
+                 :class="job.status === 'done' ? 'text-emerald-400 font-medium' : job.status === 'error' ? 'text-red-400' : 'text-slate-400'"
+                 x-text="job.status === 'done' ? '✓ Done! '+(job.processed||0)+' cards scanned'+(job.failed?' ('+job.failed+' failed)':'')
+                         : job.status === 'error' ? '✗ Error processing video'
+                         : job.status === 'queued' ? 'Queued...'
+                         : job.source === 'video' && !job.extraction_total ? 'Analyzing video...'
+                         : job.source === 'video' && job.extraction_total && job.extraction_done < job.extraction_total ? 'Extracting frames from video...'
+                         : job.total > 0 ? 'Identifying cards & looking up comps...'
+                         : 'Processing...'"></div>
+          </div>
+        </template>
       </div>
     </template>
     <!-- mobile quick stats -->
