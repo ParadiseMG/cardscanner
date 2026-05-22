@@ -23,7 +23,7 @@ services:
       - OLLAMA_VISION_MODEL=${OLLAMA_VISION_MODEL:-llama3.2-vision:11b}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - ANTHROPIC_MODEL=${ANTHROPIC_MODEL:-}
-      - NTFY_TOPIC=${NTFY_TOPIC:-}
+      - NTFY_TOPIC=${NTFY_TOPIC:-cardScanner}
       - NTFY_SERVER=${NTFY_SERVER:-https://ntfy.sh}
     extra_hosts:
       - "host.docker.internal:host-gateway"
