@@ -61,6 +61,9 @@ class Settings(BaseSettings):
     ntfy_topic: str = ""  # e.g. "cardscanner-connor" — leave blank to disable
     ntfy_server: str = "https://ntfy.sh"
 
+    # Skip comp lookup entirely (set to true while migrating pricing sources)
+    skip_comp_lookup: bool = True
+
     # Pricing strategy (applies when sourcing prices from eBay Browse API
     # active listings). "Undercut the lowest active asking by N%" — typical
     # range is 5-7. Lower = sells faster but leaves money on the table; higher

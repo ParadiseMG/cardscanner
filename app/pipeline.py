@@ -97,14 +97,18 @@ async def _process_one(
 
         # Comp lookup is best-effort — save the card even if pricing fails
         comp = None
-        try:
-            with _log.step(log, "comp_lookup", player=ident.player, year=ident.year):
-                comp = await comp_lookup.fetch_comps(
-                    ident.year, ident.set_brand, ident.player, ident.card_no, ident.parallel,
-                )
-        except Exception as comp_err:
-            log.warning("comp lookup failed, saving card without pricing",
-                        extra={"player": ident.player, "error": str(comp_err)})
+        if settings.skip_comp_lookup:
+            log.info("comp lookup skipped (SKIP_COMP_LOOKUP=true)",
+                     extra={"player": ident.player})
+        else:
+            try:
+                with _log.step(log, "comp_lookup", player=ident.player, year=ident.year):
+                    comp = await comp_lookup.fetch_comps(
+                        ident.year, ident.set_brand, ident.player, ident.card_no, ident.parallel,
+                    )
+            except Exception as comp_err:
+                log.warning("comp lookup failed, saving card without pricing",
+                            extra={"player": ident.player, "error": str(comp_err)})
 
         # Reconcile sport: trust set_brand keywords over Claude's default-Baseball bias.
         from app.utils.sport_inference import reconcile_sport
