@@ -156,11 +156,11 @@ async def _notify_captcha(page, url: str) -> None:
                 content=screenshot,
                 headers={
                     "Title": "CardScanner: Captcha needed",
-                    "Message": f"Solve at http://{settings.host}:{settings.port}/captcha",
+                    "Message": "Tap to solve the captcha from your phone",
                     "Tags": "robot,warning",
                     "Filename": "captcha.png",
                     "Priority": "high",
-                    "Click": f"http://{settings.host}:{settings.port}/captcha",
+                    "Click": f"http://100.71.106.53:{settings.port}/captcha",
                 },
             )
         log.info("captcha notification sent via ntfy")
