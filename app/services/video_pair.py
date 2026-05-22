@@ -70,7 +70,8 @@ def pair_frames(frames: list[Path], sides: list[str]) -> list[PairedCard]:
 async def classify_sides(frames: list[Path]) -> list[str]:
     """Ask vision model whether each frame is a card front or back.
 
-    Uses Ollama for cheap local inference.
+    Uses Ollama for cheap local inference. Falls back to alternating
+    pattern when the model is unavailable or ambiguous.
     """
     import base64
 
@@ -81,15 +82,25 @@ async def classify_sides(frames: list[Path]) -> list[str]:
         for frame_path in frames:
             image_b64 = base64.b64encode(frame_path.read_bytes()).decode()
 
-            resp = await client.post(url, json={
-                "model": settings.ollama_vision_model,
-                "prompt": (
-                    "Is this the front or back of a trading card? "
-                    "Reply with exactly one word: front or back"
-                ),
-                "images": [image_b64],
-                "stream": False,
-            })
+            try:
+                resp = await client.post(url, json={
+                    "model": settings.ollama_vision_model,
+                    "prompt": (
+                        "Look at this trading card image. Is this showing the "
+                        "FRONT (player photo, team logo, card design) or the "
+                        "BACK (stats, card number, bio text, barcode) of the card? "
+                        'Return JSON: {"side": "front"} or {"side": "back"}'
+                    ),
+                    "images": [image_b64],
+                    "format": "json",
+                    "stream": False,
+                }, timeout=120.0)
+            except Exception as exc:
+                expected = "front" if len(sides) % 2 == 0 else "back"
+                sides.append(expected)
+                logger.warning("Vision call failed for %s (%s), defaulting to %s",
+                               frame_path.name, type(exc).__name__, expected)
+                continue
 
             if resp.status_code == 200:
                 answer = resp.json().get("response", "").strip().lower()
@@ -98,7 +109,6 @@ async def classify_sides(frames: list[Path]) -> list[str]:
                 elif "back" in answer:
                     sides.append("back")
                 else:
-                    # Default to expected alternating pattern
                     expected = "front" if len(sides) % 2 == 0 else "back"
                     sides.append(expected)
                     logger.warning(
@@ -108,6 +118,7 @@ async def classify_sides(frames: list[Path]) -> list[str]:
             else:
                 expected = "front" if len(sides) % 2 == 0 else "back"
                 sides.append(expected)
-                logger.warning("Vision call failed for %s, defaulting to %s", frame_path.name, expected)
+                logger.warning("Vision call failed for %s (HTTP %d), defaulting to %s",
+                               frame_path.name, resp.status_code, expected)
 
     return sides

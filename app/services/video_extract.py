@@ -17,6 +17,129 @@ from app.utils.images import normalize
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Card-aware orientation and quality helpers
+# ---------------------------------------------------------------------------
+
+# Trading card aspect ratio range (width / height in portrait). Standard
+# cards are 2.5" × 3.5" = 0.714. Allow generous tolerance for sleeves,
+# penny holders, and slight camera angle.
+_CARD_ASPECT_LO = 0.55
+_CARD_ASPECT_HI = 0.85
+_MIN_CARD_AREA_PCT = 0.03  # card must be ≥3% of frame area
+
+
+def _find_card_rect(img: np.ndarray) -> Optional[tuple]:
+    """Find the largest card-shaped rectangle in the image.
+
+    Returns the cv2.minAreaRect tuple ((cx,cy), (w,h), angle) or None.
+    """
+    h, w = img.shape[:2]
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    blurred = cv2.GaussianBlur(gray, (7, 7), 0)
+    edges = cv2.Canny(blurred, 30, 100)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    dilated = cv2.dilate(edges, kernel, iterations=3)
+
+    contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL,
+                                   cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
+
+    img_area = h * w
+    for cnt in sorted(contours, key=cv2.contourArea, reverse=True)[:5]:
+        area = cv2.contourArea(cnt)
+        if area < img_area * _MIN_CARD_AREA_PCT:
+            continue
+        rect = cv2.minAreaRect(cnt)
+        _, (rw, rh), _ = rect
+        if min(rw, rh) < 50:
+            continue
+        aspect = min(rw, rh) / max(rw, rh)
+        if _CARD_ASPECT_LO < aspect < _CARD_ASPECT_HI:
+            return rect
+    return None
+
+
+def detect_card_rotation(img: np.ndarray) -> Optional[int]:
+    """Detect whether a frame's card is sideways.
+
+    Returns a cv2 rotation constant (``ROTATE_90_COUNTERCLOCKWISE`` etc.)
+    or *None* when the card is already upright or undetectable.
+    """
+    rect = _find_card_rect(img)
+    if rect is None:
+        return None
+
+    (_, _), (rw, rh), angle = rect
+
+    # Determine the angle of the card's long axis from horizontal
+    if rw > rh:
+        long_axis_deg = angle % 180
+    else:
+        long_axis_deg = (angle + 90) % 180
+
+    is_horizontal = long_axis_deg < 35 or long_axis_deg > 145
+    if not is_horizontal:
+        return None  # card long-axis is vertical → already upright
+
+    # Card is sideways. Default to CCW (the common case for portrait-mode
+    # phone videos where the card is on a flat surface).
+    return cv2.ROTATE_90_COUNTERCLOCKWISE
+
+
+def auto_orient_frame(frame: np.ndarray,
+                      forced_rotation: Optional[int] = None) -> np.ndarray:
+    """Rotate *frame* so the card is upright.
+
+    If *forced_rotation* is given (from a prior batch-level decision), it is
+    applied unconditionally. Otherwise ``detect_card_rotation`` is called.
+    """
+    rot = forced_rotation if forced_rotation is not None else detect_card_rotation(frame)
+    if rot is None:
+        return frame
+    return cv2.rotate(frame, rot)
+
+
+def frame_has_card(img: np.ndarray, min_area_pct: float = 0.05) -> bool:
+    """Return True if the frame contains a card-shaped rectangle of
+    sufficient size.  Used to reject near-blank / transition frames."""
+    h, w = img.shape[:2]
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    blurred = cv2.GaussianBlur(gray, (7, 7), 0)
+    edges = cv2.Canny(blurred, 30, 100)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    dilated = cv2.dilate(edges, kernel, iterations=3)
+
+    contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL,
+                                   cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return False
+
+    img_area = h * w
+    largest = max(contours, key=cv2.contourArea)
+    return cv2.contourArea(largest) >= img_area * min_area_pct
+
+
+def frames_nearly_identical(a: np.ndarray, b: np.ndarray,
+                            threshold: float = 0.97) -> bool:
+    """Return True if two frames are nearly pixel-identical.
+
+    Uses normalised absolute difference — catches the case where
+    the same still window gets split into two due to motion threshold
+    fragmentation and produces a literal duplicate frame.  Does NOT
+    attempt semantic "same card" detection (too unreliable with shared
+    backgrounds).
+    """
+    if a.shape != b.shape:
+        # Resize smaller to match (handles very minor crop differences)
+        target = (min(a.shape[1], b.shape[1]), min(a.shape[0], b.shape[0]))
+        a = cv2.resize(a, target)
+        b = cv2.resize(b, target)
+    diff = cv2.absdiff(a, b)
+    score = 1.0 - (diff.mean() / 255.0)
+    return score >= threshold
+
 # --- Low-level helpers (tested directly) ---
 
 def sharpness_score(gray: np.ndarray) -> float:
@@ -202,8 +325,12 @@ def extract_frames(video_path: Path, on_progress: Optional[callable] = None) -> 
     output_dir.mkdir(exist_ok=True)
 
     extracted: list[Path] = []
+    prev_frame: Optional[np.ndarray] = None   # for consecutive dedup
+    batch_rotation: Optional[int] = None      # determined once, applied to all
+    batch_rotation_decided = False
     window_idx = 0
     frame_idx = 0
+    frame_counter = 0   # sequential counter for output filenames (skip gaps)
     window_frames: list[tuple[int, np.ndarray]] = []
     current_window = windows[window_idx] if windows else None
 
@@ -230,10 +357,32 @@ def extract_frames(video_path: Path, on_progress: Optional[callable] = None) -> 
                     window_idx, sharp, min_sharpness,
                 )
             else:
-                out_path = output_dir / f"frame_{window_idx:04d}.jpg"
-                cv2.imwrite(str(out_path), best_frame, [cv2.IMWRITE_JPEG_QUALITY, 92])
-                normalized = normalize(out_path)
-                extracted.append(normalized)
+                # --- Card content check: skip near-blank frames ---
+                if not frame_has_card(best_frame):
+                    logger.warning("Window %d: no card detected in frame, skipping", window_idx)
+                else:
+                    # --- Auto-orient: fix sideways cards ---
+                    if not batch_rotation_decided:
+                        batch_rotation = detect_card_rotation(best_frame)
+                        batch_rotation_decided = True
+                        if batch_rotation is not None:
+                            label = {cv2.ROTATE_90_CLOCKWISE: "90° CW",
+                                     cv2.ROTATE_90_COUNTERCLOCKWISE: "90° CCW",
+                                     cv2.ROTATE_180: "180°"}.get(batch_rotation, str(batch_rotation))
+                            logger.info("Auto-orient: rotating all frames %s", label)
+
+                    oriented = auto_orient_frame(best_frame, batch_rotation)
+
+                    # --- Consecutive-frame duplicate detection ---
+                    if prev_frame is not None and frames_nearly_identical(oriented, prev_frame):
+                        logger.info("Window %d: near-identical to previous frame, skipping", window_idx)
+                    else:
+                        out_path = output_dir / f"frame_{frame_counter:04d}.jpg"
+                        cv2.imwrite(str(out_path), oriented, [cv2.IMWRITE_JPEG_QUALITY, 92])
+                        normalized = normalize(out_path)
+                        extracted.append(normalized)
+                        prev_frame = oriented
+                        frame_counter += 1
 
             window_frames = []
             window_idx += 1
@@ -246,5 +395,7 @@ def extract_frames(video_path: Path, on_progress: Optional[callable] = None) -> 
 
     cap.release()
 
-    logger.info("Extracted %d frames from %d still windows", len(extracted), len(windows))
+    skipped = len(windows) - len(extracted)
+    logger.info("Extracted %d frames from %d still windows (%d skipped: blank/duplicate/blur)",
+                len(extracted), len(windows), skipped)
     return extracted

@@ -126,7 +126,13 @@ back). Return STRICT JSON ONLY with these keys -- no prose, no markdown fences:
 }
 
 Guidelines:
+- ONLY report what you can actually read or see in the image. If text is not
+  legible, use null — do NOT guess or infer from partial text.
 - If you cannot identify a field, use null (not "Unknown").
+- card_no: copy the printed card number EXACTLY as shown (e.g. "LGD-WMO",
+  "CM-MEV", "128"). Do not invent or modify card numbers.
+- player: only name players whose names you can read on the card. For multi-
+  player cards, list the primary player or all visible names separated by " / ".
 - Condition: judge based on corners, edges, surface, centering visible in photo.
   Default to "NM" for clean modern cards, "EX" for light wear, "VG" for visible
   wear. Only use "Graded" when the card is in a sealed grading slab.
@@ -136,7 +142,8 @@ Guidelines:
   year). Use the season printed on the card if visible.
 - field_confidence: rate each key field 0..1 (1.0 = certain, 0.0 = guessing).
   Use lower values when the photo is blurry, text is obscured, or you are
-  making an educated guess.
+  making an educated guess. Be HONEST — if you cannot read a field clearly,
+  set confidence to 0.1 or lower.
 - condition_signals: omit keys where not visible (set to null).
 - photo_quality: "good" for clear, well-lit, front-facing shots. "blurry" for
   out-of-focus. "obstructed" for fingers/glare blocking parts. "off_angle" for
