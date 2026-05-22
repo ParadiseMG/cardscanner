@@ -391,6 +391,7 @@ async def _ollama_call(
         "messages": [
             {"role": "user", "content": "\n\n".join(parts), "images": images},
         ],
+        "format": "json",
         "stream": False,
         "options": {"num_predict": max_tokens},
     }
@@ -506,7 +507,14 @@ async def identify_card_async(
     elif backend == "http":
         raw = await _http_call(fp, bp, _PROMPT, key, client=client)
 
-    parsed = _parse_json_block(raw)
+    try:
+        parsed = _parse_json_block(raw)
+    except ValueError:
+        if backend == "ollama":
+            log.warning("ollama returned non-JSON, retrying once",
+                        extra={"raw_preview": raw[:120]})
+            raw = await _ollama_call(fp, bp, _PROMPT)
+        parsed = _parse_json_block(raw)
 
     raw_fc = parsed.get("field_confidence") or {}
     field_confidence: dict[str, float] = {}
