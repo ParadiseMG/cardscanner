@@ -358,7 +358,7 @@ def _stitch_front_back(fp: Path, bp: Path) -> bytes:
     sep = np.zeros((labeled_parts[0].shape[0], 4, 3), dtype=np.uint8)
     composite = np.hstack([labeled_parts[0], sep, labeled_parts[1]])
 
-    _, buf = cv2.imencode(".jpg", composite, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    _, buf = cv2.imencode(".jpg", composite, [cv2.IMWRITE_JPEG_QUALITY, 95])
     return buf.tobytes()
 
 
@@ -367,7 +367,7 @@ async def _ollama_call(
     bp: Optional[Path],
     prompt_text: str,
     *,
-    max_tokens: int = 800,
+    max_tokens: int = 1200,
 ) -> str:
     """Call the Ollama /api/chat endpoint with vision. Returns raw text.
 
