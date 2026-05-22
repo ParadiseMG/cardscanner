@@ -77,7 +77,7 @@ async def classify_sides(frames: list[Path]) -> list[str]:
     sides: list[str] = []
     url = f"{settings.ollama_base_url.rstrip('/')}/api/generate"
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with httpx.AsyncClient(timeout=120.0) as client:
         for frame_path in frames:
             image_b64 = base64.b64encode(frame_path.read_bytes()).decode()
 
