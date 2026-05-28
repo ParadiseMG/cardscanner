@@ -219,6 +219,17 @@ def recent_failures(limit: int = 30) -> dict:
         ]}
 
 
+@router.delete("/scans/recent-failures")
+def clear_failures() -> dict:
+    """Delete all JobFailure rows."""
+    with Session(get_engine()) as s:
+        count = s.exec(select(models.JobFailure)).all()
+        for f in count:
+            s.delete(f)
+        s.commit()
+        return {"deleted": len(count)}
+
+
 @router.get("/scans/jobs/{job_id}/failures")
 def job_failures(job_id: int) -> dict:
     with Session(get_engine()) as s:

@@ -287,6 +287,11 @@ function cardscanner() {
       } catch (e) { this.recentFailures = []; }
     },
 
+    async clearFailures() {
+      await fetch('/api/scans/recent-failures', { method: 'DELETE' });
+      this.recentFailures = [];
+    },
+
 
     // =========================================================================
     // Data loaders
