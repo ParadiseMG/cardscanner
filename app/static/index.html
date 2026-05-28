@@ -137,6 +137,9 @@
                          : job.source === 'video' && job.extraction_total && job.extraction_done < job.extraction_total ? 'Extracting frames from video...'
                          : job.total > 0 ? 'Identifying cards & looking up comps...'
                          : 'Processing...'"></div>
+            <template x-if="job.status === 'done' || job.status === 'error'">
+              <button @click="reidentifyJob(job.id)" class="mt-2 text-xs text-slate-400 hover:text-fuchsia-300 underline">Re-identify cards</button>
+            </template>
           </div>
         </template>
       </div>
@@ -326,6 +329,11 @@
                      : job.source==='video' && job.extraction_total && job.extraction_done < job.extraction_total
                        ? 'Extracting frames from video...'
                        : 'Identifying & looking up comps...'"></div>
+        <template x-if="job.status === 'done' || job.status === 'error'">
+          <div class="text-center mt-2">
+            <button @click="reidentifyJob(job.id)" class="text-xs text-slate-400 hover:text-fuchsia-300 underline">Re-identify cards</button>
+          </div>
+        </template>
       </div>
     </template>
 
@@ -1664,6 +1672,6 @@
 
 </div>
 
-<script src="/static/app.js?v=5"></script>
+<script src="/static/app.js?v=6"></script>
 </body>
 </html>

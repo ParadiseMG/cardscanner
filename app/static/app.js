@@ -292,6 +292,21 @@ function cardscanner() {
       this.recentFailures = [];
     },
 
+    async reidentifyJob(jobId) {
+      if (!jobId) return;
+      const headers = {};
+      const key = localStorage.getItem('anthropic_key');
+      if (key) headers['X-Anthropic-Key'] = key;
+      try {
+        const r = await fetch('/api/scans/jobs/' + jobId + '/reidentify', { method: 'POST', headers });
+        if (!r.ok) throw new Error('status ' + r.status);
+        const data = await r.json();
+        this._showToastMsg('Re-identifying ' + data.cards + ' cards from job ' + jobId + '...');
+      } catch (e) {
+        this._showToastMsg('Re-identify failed: ' + e.message);
+      }
+    },
+
 
     // =========================================================================
     // Data loaders

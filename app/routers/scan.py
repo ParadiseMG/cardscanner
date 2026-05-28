@@ -248,3 +248,96 @@ def job_failures(job_id: int) -> dict:
              "occurred_at": f.occurred_at.isoformat() if f.occurred_at else None}
             for f in rows
         ]}
+
+
+@router.post("/scans/jobs/{job_id}/reidentify")
+async def reidentify_job(
+    job_id: int,
+    x_anthropic_key: Optional[str] = Header(default=None),
+) -> dict:
+    """Re-run vision identification on all cards from a job.
+
+    Useful when orientation/prompt improvements mean the same images
+    would produce better results now.
+    """
+    with Session(get_engine()) as s:
+        job = s.get(models.ScanJob, job_id)
+        if not job:
+            raise HTTPException(404, "job not found")
+
+        cards = s.exec(
+            select(models.Card)
+            .where(models.Card.scan_job_id == job_id)
+        ).all()
+
+    if not cards:
+        raise HTTPException(404, "no cards found for this job")
+
+    asyncio.create_task(_reidentify_cards(
+        job_id, [c.id for c in cards], x_anthropic_key,
+        batch_year=job.batch_year, batch_set_brand=job.batch_set_brand,
+    ))
+    return {"job_id": job_id, "cards": len(cards), "status": "reidentifying"}
+
+
+async def _reidentify_cards(
+    job_id: int,
+    card_ids: list[int],
+    api_key_override: Optional[str],
+    batch_year: Optional[int] = None,
+    batch_set_brand: Optional[str] = None,
+) -> None:
+    """Background: re-identify each card in a job."""
+    import json
+    from app.services import claude_vision
+    from app.db import session_scope
+
+    for card_id in card_ids:
+        try:
+            with Session(get_engine()) as s:
+                card = s.get(models.Card, card_id)
+                if not card or not card.front_image:
+                    continue
+                front_path = UPLOAD_DIR / card.front_image
+                back_path = UPLOAD_DIR / card.back_image if card.back_image else None
+
+            if not front_path.exists():
+                logger.warning("reidentify skip card %d: front_image not found", card_id)
+                continue
+
+            ident = await claude_vision.identify_card_async(
+                str(front_path),
+                str(back_path) if back_path and back_path.exists() else None,
+                api_key_override=api_key_override,
+            )
+
+            # Apply batch overrides
+            if batch_year is not None:
+                ident.year = batch_year
+                ident.field_confidence["year"] = 1.0
+            if batch_set_brand:
+                ident.set_brand = batch_set_brand
+                ident.field_confidence["set_brand"] = 1.0
+
+            with session_scope() as s:
+                card = s.get(models.Card, card_id)
+                if not card:
+                    continue
+                for f in ("year", "set_brand", "player", "card_no", "parallel",
+                          "sport", "team", "condition", "is_graded", "grade",
+                          "is_autograph", "is_relic", "is_rookie",
+                          "is_serial_numbered", "serial_print_run", "photo_quality"):
+                    val = getattr(ident, f, None)
+                    if val is not None:
+                        setattr(card, f, val)
+                if ident.low_confidence_fields:
+                    card.low_confidence_fields = json.dumps(ident.low_confidence_fields)
+                if ident.condition_signals:
+                    card.condition_signals = json.dumps(ident.condition_signals)
+                card.updated_at = datetime.utcnow()
+                s.add(card)
+
+            logger.info("Reidentified card %d: player=%s", card_id, ident.player)
+
+        except Exception:
+            logger.exception("Reidentify failed for card %d", card_id)

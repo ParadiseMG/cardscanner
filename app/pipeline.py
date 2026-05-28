@@ -182,6 +182,8 @@ async def _process_one(
                 comp_median_weighted=comp.median_recency_weighted if comp else None,
                 comp_suspicious_bulk=comp.suspicious_bulk if comp else False,
                 comp_suspicious_reason=(comp.suspicious_reason or None) if comp else None,
+                # Link card to its parent scan job for re-identification
+                scan_job_id=job_id,
                 # m11: inherit storage from the parent sync job
                 storage_location_id=job_storage_location_id,
                 storage_position=job_storage_position,
@@ -274,11 +276,22 @@ async def run_job(job_id: int, image_paths: list[Path], api_key_override: Option
 # ---------------------------------------------------------------------------
 async def run_job_paired(job_id: int, pairs: list, api_key_override: Optional[str]) -> None:
     """Process pre-paired images (from video extraction). Skips auto_pair."""
+    import shutil as _shutil
     from app.services.auto_pair import Pair
     from app.services.video_pair import PairedCard
 
-    # Convert PairedCard to Pair for the worker
-    pipeline_pairs = [Pair(front=p.front, back=p.back) for p in pairs]
+    # Copy frame images to UPLOAD_DIR so they persist for re-identification
+    pipeline_pairs = []
+    for p in pairs:
+        front_dest = UPLOAD_DIR / p.front.name
+        if not front_dest.exists():
+            _shutil.copy2(p.front, front_dest)
+        back_dest = None
+        if p.back:
+            back_dest = UPLOAD_DIR / p.back.name
+            if not back_dest.exists():
+                _shutil.copy2(p.back, back_dest)
+        pipeline_pairs.append(Pair(front=front_dest, back=back_dest))
 
     with session_scope() as s:
         job = s.get(models.ScanJob, job_id)
