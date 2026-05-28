@@ -48,9 +48,9 @@ RETRY_ATTEMPTS = 3
 CLI_TIMEOUT_SECONDS = 60.0  # subprocess startup adds overhead
 
 # Fields eligible for re-prompt (lowest to highest priority in re-prompt order)
-_REPROMPT_FIELDS = ("parallel", "card_no")
+_REPROMPT_FIELDS = ("year", "card_no", "parallel")
 _REPROMPT_THRESHOLD = 0.5
-_REPROMPT_MAX_FIELDS = 2
+_REPROMPT_MAX_FIELDS = 3
 
 log = _log.get(__name__)
 
@@ -84,17 +84,27 @@ class CardIdentification:
         return asdict(self)
 
 
-_PROMPT = """You are a sports-card cataloging assistant. The card may be from any
-sport — read the brand, team, and uniform carefully before declaring a sport.
+_PROMPT = """You are a sports-card cataloging assistant. Your PRIMARY job is to READ
+THE PRINTED TEXT on the card to identify it. The three most important fields are
+year, set/brand, and card number — together these uniquely identify any card.
 
-Examine the supplied photo(s) of a single trading card (front, and possibly
-back). Return STRICT JSON ONLY with these keys -- no prose, no markdown fences:
+STRATEGY — read text first, look at pictures second:
+1. BACK OF CARD (right half if stitched): Find and read the copyright year,
+   set name / brand, and card number. These are almost always printed on the
+   back. Also look for the player name in the stat line or bio text.
+2. FRONT OF CARD (left half if stitched): Read the player name if printed.
+   Determine the parallel/variant (refractor, prizm, holo, numbered, etc.)
+   from the card's finish, border color, or printed label. Assess condition.
+3. DO NOT guess the player from the photo alone — only report a player name
+   you can read as printed text on either side.
+
+Return STRICT JSON ONLY — no prose, no markdown fences:
 
 {
-  "year": <int or null>,
-  "set_brand": <string or null e.g. "Topps Chrome", "Panini Prestige Football">,
-  "player": <string or null>,
-  "card_no": <string or null, the printed card number>,
+  "year": <int or null — the copyright year or season year printed on the back>,
+  "set_brand": <string or null e.g. "Topps Chrome", "Panini Chronicles Draft Picks">,
+  "player": <string or null — as printed on the card, not guessed from photo>,
+  "card_no": <string or null — copy the printed number EXACTLY e.g. "128", "RC-5">,
   "parallel": <string, default "Base">,
   "sport": <one of "Baseball" | "Football" | "Basketball" | "Hockey" | "Soccer" | "Other">,
   "team": <string or null>,
@@ -126,32 +136,25 @@ back). Return STRICT JSON ONLY with these keys -- no prose, no markdown fences:
 }
 
 Guidelines:
-- ONLY report what you can actually read or see in the image. If text is not
-  legible, use null — do NOT guess or infer from partial text.
-- If you cannot identify a field, use null (not "Unknown").
-- card_no: copy the printed card number EXACTLY as shown (e.g. "LGD-WMO",
-  "CM-MEV", "128"). Do not invent or modify card numbers.
-- player: only name players whose names you can read on the card. For multi-
-  player cards, list the primary player or all visible names separated by " / ".
-- Condition: judge based on corners, edges, surface, centering visible in photo.
-  Default to "NM" for clean modern cards, "EX" for light wear, "VG" for visible
-  wear. Only use "Graded" when the card is in a sealed grading slab.
-- Parallel: things like "Refractor", "Gold /50", "Black /1", "Pink Ice".
-  Use "Base" if it appears to be the base card.
-- Be precise on year. Trading-card years can be confusing (the season vs print
-  year). Use the season printed on the card if visible.
-- field_confidence: rate each key field 0..1 (1.0 = certain, 0.0 = guessing).
-  Use lower values when the photo is blurry, text is obscured, or you are
-  making an educated guess. Be HONEST — if you cannot read a field clearly,
-  set confidence to 0.1 or lower.
-- condition_signals: omit keys where not visible (set to null).
-- photo_quality: "good" for clear, well-lit, front-facing shots. "blurry" for
-  out-of-focus. "obstructed" for fingers/glare blocking parts. "off_angle" for
-  heavily skewed/angled shots.
-- is_rookie: true only for recognized first-year or prospect RC cards.
+- ONLY report what you can READ as printed text. If text is not legible, use
+  null — do NOT guess or infer from partial text.
+- year: look for a 4-digit year on the back near the copyright line (e.g.
+  "© 2022 Panini" → year is 2022). This is the most reliable source.
+- set_brand: read the full product name from the back (e.g. "Panini Chronicles
+  Draft Picks", "Topps Series 1"). Include sub-brand if printed.
+- card_no: copy EXACTLY as printed. Could be just a number ("7"), an alphanumeric
+  code ("RC-5"), or a longer reference. Do NOT confuse the year with the card
+  number — years are 4-digit numbers near the copyright symbol.
+- player: read the name as printed. For multi-player cards, list names separated
+  by " / ". If you cannot read the name, use null — do NOT guess from the photo.
+- Parallel: look for colored borders, holographic finish, "Prizm" / "Refractor" /
+  "Chrome" labels, or serial numbering. Use "Base" if none visible.
+- Condition: default to "NM" for clean modern cards. Only use "Graded" when the
+  card is in a sealed grading slab.
+- field_confidence: be HONEST. If you cannot read a field clearly, set to 0.1 or
+  lower. 1.0 means you can see the printed text clearly.
 - is_serial_numbered: true only when you can see a stamped serial number (e.g.
-  "47/100"). If true, set serial_print_run to the total print run (100 in that
-  example).
+  "47/100"). If true, set serial_print_run to the total (100 in that example).
 """
 
 
@@ -388,9 +391,9 @@ async def _ollama_call(
     else:
         images = [base64.standard_b64encode(fp.read_bytes()).decode()]
 
-    parts = ["Front of card:"]
+    parts = []
     if bp:
-        parts.append("(Left half is FRONT, right half is BACK of the card.)")
+        parts.append("This image shows FRONT (left) and BACK (right) of a trading card. Read the BACK side first for year, set name, and card number.")
     parts.append(prompt_text)
 
     payload = {
@@ -435,7 +438,7 @@ def _ollama_fallback_backend(api_key_override: Optional[str]) -> Optional[str]:
 # ---------------------------------------------------------------------------
 def _build_reprompt_text(field_name: str, current_value) -> str:
     return (
-        f"Look very carefully at this baseball card image.\n\n"
+        f"Look very carefully at this trading card image.\n\n"
         f"I need you to identify ONLY the '{field_name}' field.\n"
         f"Current value I have is: {current_value!r}\n\n"
         f"Return STRICT JSON ONLY with exactly two keys, no prose, no markdown:\n"
