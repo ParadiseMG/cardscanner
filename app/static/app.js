@@ -62,6 +62,9 @@ function cardscanner() {
     batchSetBrand: '',
     job: null,
     jobPoll: null,
+    uploadQueue: [],      // [{file, status, job, label}] — pending video uploads
+    queuePoll: null,
+    queueProcessing: false,
     stats: {},
     insights: [],
     actionQ: {},
@@ -888,50 +891,121 @@ function cardscanner() {
     async uploadFiles(files) {
       if (!files || !files.length) return;
 
-      // Check if any file is a video
-      const videoFile = Array.from(files).find(f =>
-        /\.(mov|mp4|m4v)$/i.test(f.name) || f.type.startsWith('video/')
-      );
+      const allFiles = Array.from(files);
+      const videos = allFiles.filter(f => /\.(mov|mp4|m4v)$/i.test(f.name) || f.type.startsWith('video/'));
+      const photos = allFiles.filter(f => !videos.includes(f));
 
-      const headers = {};
-      const key = localStorage.getItem('anthropic_key');
-      if (key) headers['X-Anthropic-Key'] = key;
+      // Queue all videos
+      for (const v of videos) {
+        const sizeMB = (v.size / 1024 / 1024).toFixed(1);
+        this.uploadQueue.push({
+          file: v,
+          name: v.name,
+          sizeMB,
+          status: 'pending',  // pending | uploading | processing | done | error
+          job: null,
+          label: `${v.name} (${sizeMB} MB)`,
+        });
+      }
 
-      if (videoFile) {
-        // Show uploading state immediately
-        const sizeMB = (videoFile.size / 1024 / 1024).toFixed(1);
-        this.job = { status: 'uploading', source: 'video', label: `Uploading video (${sizeMB} MB)...`, total: 0, processed: 0 };
+      // Upload photos immediately (non-queued, same as before)
+      if (photos.length) {
+        const headers = {};
+        const key = localStorage.getItem('anthropic_key');
+        if (key) headers['X-Anthropic-Key'] = key;
 
-        // Video upload — single file to video endpoint
+        this.job = { status: 'uploading', source: 'photo', label: `Uploading ${photos.length} photo(s)...`, total: 0, processed: 0 };
         const fd = new FormData();
-        fd.append('file', videoFile);
-        fd.append('label', `Video scan`);
-        if (this.batchYear) fd.append('batch_year', this.batchYear);
-        if (this.batchSetBrand) fd.append('batch_set_brand', this.batchSetBrand);
-        try {
-          const res = await fetch('/api/scans/upload-video', { method: 'POST', body: fd, headers }).then(r => r.json());
-          if (res.error || res.detail) { this.job = null; alert(res.detail || res.error); return; }
-          this.job = { id: res.job_id, total: 0, processed: 0, status: 'queued', source: 'video', label: 'Video scan' };
-        } catch (e) {
-          this.job = null; alert('Upload failed: ' + e.message); return;
-        }
-      } else {
-        // Show uploading state
-        this.job = { status: 'uploading', source: 'photo', label: `Uploading ${files.length} photo(s)...`, total: 0, processed: 0 };
-
-        const fd = new FormData();
-        for (const f of files) fd.append('files', f);
-        fd.append('label', `Batch of ${files.length}`);
+        for (const f of photos) fd.append('files', f);
+        fd.append('label', `Batch of ${photos.length}`);
         try {
           const res = await fetch('/api/scans/upload', { method: 'POST', body: fd, headers }).then(r => r.json());
-          this.job = { id: res.job_id, total: res.queued, processed: 0, status: 'queued', source: 'photo', label: `Batch of ${files.length}` };
+          this.job = { id: res.job_id, total: res.queued, processed: 0, status: 'queued', source: 'photo', label: `Batch of ${photos.length}` };
+          if (this.jobPoll) clearInterval(this.jobPoll);
+          this.jobPoll = setInterval(() => this.pollJob(), 1500);
         } catch (e) {
           this.job = null; alert('Upload failed: ' + e.message); return;
         }
       }
 
-      if (this.jobPoll) clearInterval(this.jobPoll);
-      this.jobPoll = setInterval(() => this.pollJob(), 1500);
+      // Start processing the video queue
+      if (videos.length) this.processQueue();
+    },
+
+    async processQueue() {
+      if (this.queueProcessing) return;
+      this.queueProcessing = true;
+
+      const headers = {};
+      const key = localStorage.getItem('anthropic_key');
+      if (key) headers['X-Anthropic-Key'] = key;
+
+      while (true) {
+        const next = this.uploadQueue.find(q => q.status === 'pending');
+        if (!next) break;
+
+        next.status = 'uploading';
+
+        const fd = new FormData();
+        fd.append('file', next.file);
+        fd.append('label', 'Video scan');
+        if (this.batchYear) fd.append('batch_year', this.batchYear);
+        if (this.batchSetBrand) fd.append('batch_set_brand', this.batchSetBrand);
+
+        try {
+          const res = await fetch('/api/scans/upload-video', { method: 'POST', body: fd, headers }).then(r => r.json());
+          if (res.error || res.detail) {
+            next.status = 'error';
+            next.label = `${next.name} — ${res.detail || res.error}`;
+            continue;
+          }
+          next.job = { id: res.job_id, total: 0, processed: 0, status: 'queued', source: 'video' };
+          next.status = 'processing';
+          // Free the file reference
+          next.file = null;
+        } catch (e) {
+          next.status = 'error';
+          next.label = `${next.name} — upload failed`;
+          continue;
+        }
+      }
+
+      // Start polling all processing queue items
+      if (!this.queuePoll) {
+        this.queuePoll = setInterval(() => this.pollQueue(), 2000);
+      }
+      this.queueProcessing = false;
+    },
+
+    async pollQueue() {
+      const active = this.uploadQueue.filter(q => q.status === 'processing' && q.job);
+      if (!active.length) {
+        // All done — check if everything is finished
+        const allDone = this.uploadQueue.every(q => q.status === 'done' || q.status === 'error');
+        if (allDone && this.uploadQueue.length) {
+          clearInterval(this.queuePoll);
+          this.queuePoll = null;
+          await this.refreshAll();
+          this.drawCharts();
+          // Clear queue after a delay so user can see the final state
+          setTimeout(() => { this.uploadQueue = []; }, 5000);
+        }
+        return;
+      }
+
+      for (const item of active) {
+        try {
+          const j = await fetch('/api/scans/jobs/' + item.job.id).then(r => r.json());
+          item.job = j;
+          if (j.status === 'done') {
+            item.status = 'done';
+            await this.refreshAll();
+            this.drawCharts();
+          } else if (j.status === 'error' || j.status === 'abandoned') {
+            item.status = 'error';
+          }
+        } catch (e) { /* retry next poll */ }
+      }
     },
 
     async pollJob() {
