@@ -372,7 +372,10 @@
       <div class="rounded-xl bg-rose-950/30 border border-rose-900/40 p-4 mb-6">
         <div class="flex justify-between items-center mb-3">
           <h3 class="font-semibold text-rose-200">⚠ Recent failures (<span x-text="recentFailures.length"></span>)</h3>
-          <button @click="loadRecentFailures()" class="text-xs text-slate-400 hover:text-slate-200">refresh</button>
+          <div class="flex gap-2">
+            <button @click="loadRecentFailures()" class="text-xs text-slate-400 hover:text-slate-200">refresh</button>
+            <button @click="recentFailures = []" class="text-xs text-slate-400 hover:text-rose-300">clear</button>
+          </div>
         </div>
         <div class="space-y-2 text-xs">
           <template x-for="f in recentFailures.slice(0, 8)" :key="f.id">
@@ -1661,6 +1664,6 @@
 
 </div>
 
-<script src="/static/app.js?v=3"></script>
+<script src="/static/app.js?v=4"></script>
 </body>
 </html>
