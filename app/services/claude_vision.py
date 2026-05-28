@@ -48,7 +48,7 @@ RETRY_ATTEMPTS = 3
 CLI_TIMEOUT_SECONDS = 60.0  # subprocess startup adds overhead
 
 # Fields eligible for re-prompt (lowest to highest priority in re-prompt order)
-_REPROMPT_FIELDS = ("year", "card_no", "parallel")
+_REPROMPT_FIELDS = ("player", "year", "card_no", "parallel")
 _REPROMPT_THRESHOLD = 0.5
 _REPROMPT_MAX_FIELDS = 3
 

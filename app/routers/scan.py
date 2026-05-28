@@ -16,7 +16,7 @@ from app import models, pipeline
 from app.config import UPLOAD_DIR, settings
 from app.db import get_engine
 from app.models import ScanJob
-from app.services.video_extract import extract_frames
+from app.services.video_extract import extract_frames, check_batch_upside_down, rotate_all_frames
 from app.services.video_pair import classify_sides, pair_frames
 
 logger = logging.getLogger(__name__)
@@ -137,6 +137,10 @@ async def _process_video(
                 job.finished_at = datetime.utcnow()
                 s.commit()
             return
+
+        # Check if batch is upside-down and fix
+        if await check_batch_upside_down(frames):
+            rotate_all_frames(frames)
 
         # Classify front/back
         sides = await classify_sides(frames)

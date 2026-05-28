@@ -66,6 +66,10 @@ def detect_card_rotation(img: np.ndarray) -> Optional[int]:
 
     Returns a cv2 rotation constant (``ROTATE_90_COUNTERCLOCKWISE`` etc.)
     or *None* when the card is already upright or undetectable.
+
+    Note: 180° (upside-down) detection is handled separately by
+    ``check_batch_upside_down`` using the vision model, since pure CV
+    approaches can't reliably distinguish upside-down text.
     """
     rect = _find_card_rect(img)
     if rect is None:
@@ -86,6 +90,63 @@ def detect_card_rotation(img: np.ndarray) -> Optional[int]:
     # Card is sideways. Default to CCW (the common case for portrait-mode
     # phone videos where the card is on a flat surface).
     return cv2.ROTATE_90_COUNTERCLOCKWISE
+
+
+async def check_batch_upside_down(frames: list[Path]) -> bool:
+    """Ask the vision model if the first frame's text is upside down.
+
+    Uses a quick Ollama call. Returns True if the batch should be
+    rotated 180°. Checks up to 2 frames to reduce false positives.
+    """
+    import base64
+    import httpx
+
+    if not frames:
+        return False
+
+    url = f"{settings.ollama_base_url.rstrip('/')}/api/generate"
+    check_frames = frames[:2]  # check first 2 frames
+
+    votes_upside_down = 0
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        for frame_path in check_frames:
+            image_b64 = base64.b64encode(frame_path.read_bytes()).decode()
+            try:
+                resp = await client.post(url, json={
+                    "model": settings.ollama_vision_model,
+                    "prompt": (
+                        "Look at the trading card in this image. "
+                        "Is the text on the card right-side-up (readable normally) "
+                        "or upside-down (rotated 180 degrees)? "
+                        'Return JSON: {"orientation": "normal"} or {"orientation": "upside_down"}'
+                    ),
+                    "images": [image_b64],
+                    "format": "json",
+                    "stream": False,
+                }, timeout=30.0)
+                if resp.status_code == 200:
+                    answer = resp.json().get("response", "").lower()
+                    if "upside_down" in answer or "upside-down" in answer:
+                        votes_upside_down += 1
+            except Exception as exc:
+                logger.warning("Orientation check failed for %s: %s", frame_path.name, exc)
+
+    is_upside_down = votes_upside_down > len(check_frames) / 2
+    if is_upside_down:
+        logger.info("Batch detected as upside-down (%d/%d votes), will rotate 180°",
+                     votes_upside_down, len(check_frames))
+    return is_upside_down
+
+
+def rotate_all_frames(frames: list[Path]) -> list[Path]:
+    """Rotate all frame images 180° in-place. Returns the same paths."""
+    for frame_path in frames:
+        img = cv2.imread(str(frame_path))
+        if img is not None:
+            rotated = cv2.rotate(img, cv2.ROTATE_180)
+            cv2.imwrite(str(frame_path), rotated, [cv2.IMWRITE_JPEG_QUALITY, 92])
+    logger.info("Rotated %d frames 180°", len(frames))
+    return frames
 
 
 def auto_orient_frame(frame: np.ndarray,
