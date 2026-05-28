@@ -18,7 +18,7 @@ from sqlmodel import Session, select
 from app import models, achievements
 from app.config import settings, UPLOAD_DIR
 from app.db import get_engine, session_scope
-from app.services import claude_vision, comp_lookup, hit_watchlist, sheets_sync, xlsx_mirror, drive_inbox
+from app.services import claude_vision, comp_lookup, hit_watchlist, sheets_sync, xlsx_mirror
 from app.services.auto_pair import auto_pair
 from app.utils import logger as _log
 from app.utils.images import normalize as normalize_image
@@ -27,14 +27,13 @@ log = _log.get(__name__)
 
 
 def _record_failure(job_id: Optional[int], file_name: str, error: str,
-                    *, error_class: Optional[str] = None,
-                    drive_id: Optional[str] = None) -> None:
+                    *, error_class: Optional[str] = None) -> None:
     """Persist one failure row so the dashboard can show the user why it failed."""
     try:
         with session_scope() as s:
             s.add(models.JobFailure(
                 scan_job_id=job_id, file_name=file_name,
-                drive_id=drive_id, error=error[:500], error_class=error_class,
+                error=error[:500], error_class=error_class,
             ))
     except Exception:
         log.exception("failed to record JobFailure")
@@ -51,8 +50,6 @@ async def _process_one(
     back_path: Optional[Path] = None,
     front_hash: Optional[str] = None,
     back_hash: Optional[str] = None,
-    drive_front_id: Optional[str] = None,
-    drive_back_id: Optional[str] = None,
     job_id: Optional[int] = None,
 ) -> dict:
     """Identify + comp-lookup a single image. Persist a Card. Return dict."""
@@ -79,12 +76,16 @@ async def _process_one(
     # restart still picks it up (it's persisted on the job row).
     job_storage_location_id: Optional[int] = None
     job_storage_position: Optional[str] = None
+    job_batch_year: Optional[int] = None
+    job_batch_set_brand: Optional[str] = None
     if job_id is not None:
         with session_scope() as s:
             j = s.get(models.ScanJob, job_id)
             if j is not None:
                 job_storage_location_id = j.storage_location_id
                 job_storage_position = j.storage_position
+                job_batch_year = j.batch_year
+                job_batch_set_brand = j.batch_set_brand
 
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
@@ -94,6 +95,14 @@ async def _process_one(
                     back_path=str(back_path) if back_path else None,
                     api_key_override=api_key_override, client=client,
                 )
+
+        # Override year/set_brand with user-provided batch values
+        if job_batch_year is not None:
+            ident.year = job_batch_year
+            ident.field_confidence["year"] = 1.0
+        if job_batch_set_brand:
+            ident.set_brand = job_batch_set_brand
+            ident.field_confidence["set_brand"] = 1.0
 
         # Comp lookup is best-effort — save the card even if pricing fails
         comp = None
@@ -146,7 +155,6 @@ async def _process_one(
                 front_image=image_path.name,
                 back_image=back_path.name if back_path else None,
                 front_hash=front_hash, back_hash=back_hash,
-                drive_front_id=drive_front_id, drive_back_id=drive_back_id,
                 comp_median=comp.median if comp else None,
                 comp_low=comp.low if comp else None,
                 comp_high=comp.high if comp else None,
@@ -220,8 +228,7 @@ async def _process_one(
             "duration_ms": int((datetime.utcnow()-started).total_seconds()*1000),
         })
         _record_failure(job_id, image_path.name, str(e),
-                        error_class=type(e).__name__,
-                        drive_id=drive_front_id)
+                        error_class=type(e).__name__)
         return {"ok": False, "error": str(e), "image": str(image_path.name)}
 
 
@@ -265,171 +272,6 @@ async def run_job(job_id: int, image_paths: list[Path], api_key_override: Option
 
 
 # ---------------------------------------------------------------------------
-# Drive-driven sync
-# ---------------------------------------------------------------------------
-async def run_drive_sync(api_key_override: Optional[str] = None,
-                         *,
-                         storage_location_id: Optional[int] = None,
-                         storage_position: Optional[str] = None) -> int:
-    """Scan the Drive inbox, process new files, return the job_id.
-
-    Refuses to start a second concurrent Drive sync (prevents the double-job
-    race that doubles processing cost). Returns the existing job_id if one
-    is already in flight.
-
-    If `storage_location_id` is provided, every Card the job creates inherits
-    it (and the optional `storage_position`). Stored on the ScanJob row so
-    the tag survives a mid-sync restart.
-    """
-    # Validate the location reference first — a bad caller should always get
-    # 400, even when another sync is already in flight.
-    if storage_location_id is not None:
-        with session_scope() as s:
-            if not s.get(models.StorageLocation, storage_location_id):
-                raise ValueError(
-                    f"storage_location_id={storage_location_id} does not exist"
-                )
-
-    # Duplicate-job lock: refuse if another Drive sync is already running.
-    with session_scope() as s:
-        from sqlmodel import select as _sel
-        in_flight = s.exec(
-            _sel(models.ScanJob).where(
-                models.ScanJob.status.in_(["queued", "processing"]),
-                models.ScanJob.label.like("Drive sync%"),
-            )
-        ).first()
-        if in_flight:
-            log.info("drive_sync skipped: existing job in flight",
-                     extra={"existing_job_id": in_flight.id})
-            return in_flight.id
-
-    folders = drive_inbox.ensure_folders()
-    files = drive_inbox.list_inbox(folders)
-    # Initial filename-based pairing (just to estimate `total`; real pairing
-    # happens post-download in _run_drive_job).
-    initial_pairs = drive_inbox.pair_files(files)
-
-    with session_scope() as s:
-        job = models.ScanJob(label=f"Drive sync ({len(files)} files)",
-                             total=len(initial_pairs),
-                             storage_location_id=storage_location_id,
-                             storage_position=storage_position)
-        s.add(job); s.commit(); s.refresh(job)
-        job_id = job.id
-
-    if not files:
-        with session_scope() as s:
-            j = s.get(models.ScanJob, job_id)
-            j.status = "done"; j.finished_at = datetime.utcnow()
-            s.add(j)
-        return job_id
-
-    asyncio.create_task(_run_drive_job(job_id, files, initial_pairs, folders, api_key_override))
-    return job_id
-
-
-async def _run_drive_job(job_id: int, all_files, initial_pairs, folders, api_key_override) -> None:
-    with session_scope() as s:
-        j = s.get(models.ScanJob, job_id)
-        j.status = "processing"; j.started_at = datetime.utcnow()
-        s.add(j)
-
-    # ------------------------------------------------------------------
-    # Phase 1: download every file and remember its Drive metadata
-    # ------------------------------------------------------------------
-    file_meta_by_path: dict[Path, dict] = {}
-    explicit_pair_paths: set[Path] = set()
-    for f in all_files:
-        local = UPLOAD_DIR / f["name"]
-        try:
-            drive_inbox.download_to(local, f["id"])
-        except Exception as e:
-            log.warning("drive download failed",
-                        extra={"name": f["name"], "error": type(e).__name__})
-            continue
-        file_meta_by_path[local] = f
-
-    # Filename-suffix pairs from the initial pass — preserve those choices
-    explicit_pairs_local: list = []
-    for front_meta, back_meta in initial_pairs:
-        if front_meta and back_meta:
-            fp = UPLOAD_DIR / front_meta["name"]
-            bp = UPLOAD_DIR / back_meta["name"]
-            if fp in file_meta_by_path and bp in file_meta_by_path:
-                from app.services.auto_pair import Pair
-                explicit_pairs_local.append(Pair(front=fp, back=bp))
-                explicit_pair_paths.add(fp)
-                explicit_pair_paths.add(bp)
-
-    # Auto-pair the rest by EXIF time + visual verification
-    leftover = [p for p in file_meta_by_path if p not in explicit_pair_paths]
-    inferred_pairs = auto_pair(leftover)
-
-    final_pairs = explicit_pairs_local + inferred_pairs
-
-    # Update job total to reflect the real pair count (auto-pairing may
-    # have collapsed singletons into pairs)
-    with session_scope() as s:
-        j = s.get(models.ScanJob, job_id)
-        j.total = len(final_pairs)
-        s.add(j)
-
-    sem = asyncio.Semaphore(3)
-
-    async def worker(pair):
-        front_path = pair.front
-        back_path = pair.back
-        front = file_meta_by_path.get(front_path)
-        back = file_meta_by_path.get(back_path) if back_path else None
-        async with sem:
-            try:
-                fh = drive_inbox.hash_file(front_path)
-
-                if drive_inbox.already_have_hash(fh):
-                    if front: drive_inbox.move_file(front["id"], folders.processed_id)
-                    if back: drive_inbox.move_file(back["id"], folders.processed_id)
-                    return {"ok": True, "skipped": True, "name": front_path.name}
-
-                bh = drive_inbox.hash_file(back_path) if back_path else None
-
-                res = await _process_one(
-                    front_path, api_key_override,
-                    back_path=back_path, front_hash=fh, back_hash=bh,
-                    drive_front_id=front["id"] if front else None,
-                    drive_back_id=back["id"] if back else None,
-                    job_id=job_id,
-                )
-                # Move
-                target = folders.processed_id if res.get("ok") else folders.failed_id
-                if front: drive_inbox.move_file(front["id"], target)
-                if back: drive_inbox.move_file(back["id"], target)
-                return res
-            except Exception as e:
-                _record_failure(job_id, front_path.name, str(e),
-                                error_class=type(e).__name__,
-                                drive_id=front["id"] if front else None)
-                if front:
-                    try: drive_inbox.move_file(front["id"], folders.failed_id)
-                    except Exception: pass
-                if back:
-                    try: drive_inbox.move_file(back["id"], folders.failed_id)
-                    except Exception: pass
-                return {"ok": False, "error": str(e)}
-            finally:
-                with session_scope() as s:
-                    j = s.get(models.ScanJob, job_id)
-                    j.processed += 1
-                    s.add(j)
-
-    await asyncio.gather(*(worker(p) for p in final_pairs))
-
-    with session_scope() as s:
-        j = s.get(models.ScanJob, job_id)
-        j.status = "done"; j.finished_at = datetime.utcnow()
-        s.add(j)
-
-
 async def run_job_paired(job_id: int, pairs: list, api_key_override: Optional[str]) -> None:
     """Process pre-paired images (from video extraction). Skips auto_pair."""
     from app.services.auto_pair import Pair

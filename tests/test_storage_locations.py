@@ -197,21 +197,6 @@ def test_listing_includes_card_count():
 # m11: per-sync storage tag — cards created by the sync inherit the tag
 # ---------------------------------------------------------------------------
 
-def test_scanjob_tag_is_persisted_and_validated():
-    """The ScanJob row stores the tag so a mid-sync restart can resume cleanly."""
-    from app import pipeline
-    import asyncio
-
-    loc_id = client.post("/api/storage-locations",
-                         json={"name": "Inbox Box"}).json()["id"]
-
-    # Validation rejects unknown locations at the run_drive_sync entry.
-    with pytest.raises(ValueError):
-        asyncio.get_event_loop().run_until_complete(
-            pipeline.run_drive_sync(storage_location_id=99999)
-        )
-
-
 def test_process_one_inherits_storage_from_job(monkeypatch):
     """A Card created by a job-running worker takes the job's location tag."""
     import asyncio

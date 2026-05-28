@@ -58,6 +58,8 @@ function cardscanner() {
     // ---- global state ----
     tab: 'Dashboard',
     dragOver: false,
+    batchYear: '',
+    batchSetBrand: '',
     job: null,
     jobPoll: null,
     stats: {},
@@ -183,9 +185,6 @@ function cardscanner() {
     keySaved: false,
     toast: null,
     valueMilestones: [100, 500, 1000, 5000, 10000, 25000, 50000],
-    drive: { connected: false, inbox_count: 0, pair_count: 0 },
-    autoPoll: false,
-    autoTimer: null,
 
     // =========================================================================
     // Init
@@ -285,15 +284,6 @@ function cardscanner() {
       } catch (e) { this.recentFailures = []; }
     },
 
-    async retryFailedDrive() {
-      if (!confirm('Move every file from Drive Failed/ back to To Be Processed/?')) return;
-      const r = await fetch('/api/drive/retry-failed', {method: 'POST'}).then(r => r.json());
-      this.toast = {icon: '🔁', title: `${r.moved} files re-queued`,
-                    description: 'Click Sync to re-process them.', tier: 'silver'};
-      setTimeout(() => this.toast = null, 4000);
-      this.loadRecentFailures();
-      this.loadEnv();  // refresh inbox count
-    },
 
     // =========================================================================
     // Data loaders
@@ -477,11 +467,6 @@ function cardscanner() {
     async loadEnv() {
       const r = await fetch('/api/auth/status').then(r => r.json());
       this.env = r;
-      try {
-        this.drive = await fetch('/api/drive/status').then(r => r.json());
-      } catch (e) { this.drive = { connected: false }; }
-      const ap = localStorage.getItem('auto_poll') === '1';
-      if (ap !== this.autoPoll) { this.autoPoll = ap; this.toggleAutoPoll(true); }
     },
 
     // B5 / C5: Load last-24h activity stripe data
@@ -891,75 +876,6 @@ function cardscanner() {
     // =========================================================================
     // Scan / Drive / upload
     // =========================================================================
-    // Manual click: prompt for the batch's storage location, then sync.
-    // Pre-fill with whatever was used last (saved in localStorage) so a stack
-    // of batches from the same binder doesn't require re-typing.
-    openSyncPrompt() {
-      const last = localStorage.getItem('sync_last_location_id');
-      this.syncPrompt = {
-        open: true,
-        locationId: last || '',
-        position: localStorage.getItem('sync_last_position') || '',
-      };
-    },
-
-    // Called by the prompt's Sync button; passes the chosen tag to the backend.
-    async confirmSync() {
-      const body = {};
-      if (this.syncPrompt.locationId !== '' && this.syncPrompt.locationId !== '__none') {
-        body.storage_location_id = Number(this.syncPrompt.locationId);
-        localStorage.setItem('sync_last_location_id', this.syncPrompt.locationId);
-      } else {
-        localStorage.removeItem('sync_last_location_id');
-      }
-      if (this.syncPrompt.position) {
-        body.storage_position = this.syncPrompt.position;
-        localStorage.setItem('sync_last_position', this.syncPrompt.position);
-      } else {
-        localStorage.removeItem('sync_last_position');
-      }
-      this.syncPrompt.open = false;
-      await this.syncDrive(body);
-    },
-
-    // Lower-level: actually trigger the sync. `tag` is the optional body
-    // {storage_location_id, storage_position}. Used directly by auto-poll
-    // (no prompt) and by confirmSync (with the prompt's selection).
-    async syncDrive(tag) {
-      const headers = { 'Content-Type': 'application/json' };
-      const key = localStorage.getItem('anthropic_key');
-      if (key) headers['X-Anthropic-Key'] = key;
-      const body = tag && Object.keys(tag).length ? JSON.stringify(tag) : null;
-      const res = await fetch('/api/drive/sync', {
-        method: 'POST', headers, body,
-      }).then(r => r.json());
-      if (!res.job_id) { alert('Drive sync failed: ' + JSON.stringify(res)); return; }
-      this.job = { id: res.job_id, total: 0, processed: 0, status: 'queued' };
-      if (this.jobPoll) clearInterval(this.jobPoll);
-      this.jobPoll = setInterval(() => this.pollJob(), 1500);
-      this.drive = await fetch('/api/drive/status').then(r => r.json());
-    },
-
-    toggleAutoPoll(silent) {
-      if (!silent) localStorage.setItem('auto_poll', this.autoPoll ? '1' : '0');
-      if (this.autoTimer) { clearInterval(this.autoTimer); this.autoTimer = null; }
-      if (this.autoPoll) {
-        this.autoTimer = setInterval(() => {
-          if (!this.job && this.drive.connected && (this.drive.inbox_count || 0) > 0) {
-            // Auto-poll runs silently — reuse whatever location/position was
-            // picked in the most recent manual sync so unattended batches
-            // still get tagged.
-            const tag = {};
-            const last = localStorage.getItem('sync_last_location_id');
-            if (last) tag.storage_location_id = Number(last);
-            const pos = localStorage.getItem('sync_last_position');
-            if (pos) tag.storage_position = pos;
-            this.syncDrive(tag);
-          }
-        }, 5 * 60 * 1000);
-      }
-    },
-
     saveKey() {
       localStorage.setItem('anthropic_key', this.anthropicKey || '');
       this.keySaved = true;
@@ -990,6 +906,8 @@ function cardscanner() {
         const fd = new FormData();
         fd.append('file', videoFile);
         fd.append('label', `Video scan`);
+        if (this.batchYear) fd.append('batch_year', this.batchYear);
+        if (this.batchSetBrand) fd.append('batch_set_brand', this.batchSetBrand);
         try {
           const res = await fetch('/api/scans/upload-video', { method: 'POST', body: fd, headers }).then(r => r.json());
           if (res.error || res.detail) { this.job = null; alert(res.detail || res.error); return; }

@@ -30,7 +30,6 @@ from app import models
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive",
 ]
 SHEET_HEADER = [
     "Year", "Set/Brand", "Player", "Card #", "Parallel", "Condition",

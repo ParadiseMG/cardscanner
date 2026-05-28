@@ -37,16 +37,6 @@ async def _check_google() -> dict:
         return {"ok": False, "connected": True, "error": str(e)}
 
 
-async def _check_drive() -> dict:
-    try:
-        from app.services import drive_inbox
-        f = drive_inbox.ensure_folders()
-        files = drive_inbox.list_inbox(f)
-        return {"ok": True, "inbox_count": len(files)}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
-
-
 async def _check_ebay() -> dict:
     if not ebay_listing.is_configured():
         return {"ok": False, "configured": False, "env": settings.ebay_env}
@@ -100,8 +90,8 @@ async def _check_claude() -> dict:
 
 @router.get("/health")
 async def health() -> dict:
-    db, google, drive, ebay, claude = await asyncio.gather(
-        _check_db(), _check_google(), _check_drive(), _check_ebay(), _check_claude(),
+    db, google, ebay, claude = await asyncio.gather(
+        _check_db(), _check_google(), _check_ebay(), _check_claude(),
         return_exceptions=False,
     )
     overall = db["ok"]  # DB has to work; everything else is "nice to have"
@@ -112,7 +102,6 @@ async def health() -> dict:
         "checks": {
             "db": db,
             "google": google,
-            "drive": drive,
             "ebay": ebay,
             "claude": claude,
         },

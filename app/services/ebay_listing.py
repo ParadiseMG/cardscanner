@@ -370,14 +370,6 @@ async def get_image_urls_for_card(card: models.Card) -> list[str]:
                 pass
         # else: fall through
 
-    if not urls and (card.drive_front_id or card.drive_back_id):
-        try:
-            from app.services import drive_inbox
-            for fid in filter(None, [card.drive_front_id, card.drive_back_id]):
-                urls.append(drive_inbox.make_public(fid))
-        except Exception as e:
-            log.warning("drive-public fallback failed", extra={"error": str(e)})
-
     if not urls:
         urls.append("https://i.ebayimg.com/images/g/placeholder/s-l1600.jpg")
     return urls

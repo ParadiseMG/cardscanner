@@ -8,12 +8,21 @@ import pytest
 from PIL import Image
 from sqlmodel import Session, select
 
+import hashlib
+
 from app import models
 from app.db import get_engine
 from app.pipeline import _process_one
 from app.services import claude_vision, comp_lookup
-from app.services.drive_inbox import hash_file
 from app.config import UPLOAD_DIR
+
+
+def hash_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(64 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def _png(path: Path, color=(255, 0, 0)) -> Path:

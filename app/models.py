@@ -160,6 +160,9 @@ class ScanJob(SQLModel, table=True):
     source: str = "photo"  # "photo" or "video"
     extraction_total: Optional[int] = None
     extraction_done: Optional[int] = None
+    # User-provided batch metadata (overrides vision model guesses)
+    batch_year: Optional[int] = None
+    batch_set_brand: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------

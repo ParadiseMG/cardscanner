@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, BackgroundTasks, File, Header, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, File, Form, Header, HTTPException, UploadFile
 from sqlmodel import Session, select
 
 from app import models, pipeline
@@ -60,7 +60,9 @@ VIDEO_TMP_DIR = Path("/data/video-tmp")
 @router.post("/scans/upload-video")
 async def upload_video(
     file: UploadFile = File(...),
-    label: Optional[str] = None,
+    label: Optional[str] = Form(default=None),
+    batch_year: Optional[int] = Form(default=None),
+    batch_set_brand: Optional[str] = Form(default=None),
     x_anthropic_key: Optional[str] = Header(default=None),
 ) -> dict:
     """Upload a video of cards for scanning.
@@ -86,7 +88,13 @@ async def upload_video(
             f.write(chunk)
 
     # Create job
-    job = ScanJob(label=label or "Video scan", source="video", status="queued")
+    batch_label = label or "Video scan"
+    if batch_set_brand:
+        batch_label = f"{batch_year or ''} {batch_set_brand}".strip()
+    job = ScanJob(
+        label=batch_label, source="video", status="queued",
+        batch_year=batch_year, batch_set_brand=batch_set_brand,
+    )
     with Session(get_engine()) as s:
         s.add(job)
         s.commit()

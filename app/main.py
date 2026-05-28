@@ -10,7 +10,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.config import settings, REPO_ROOT, UPLOAD_DIR
 from app.db import init_db
-from app.routers import scan, inventory, stats, auth, listings, sync, drive, health as health_router
+from app.routers import scan, inventory, stats, auth, listings, sync, health as health_router
 from app.routers import bulk as bulk_router
 from app.routers import suggestions as suggestions_router
 from app.routers import diag as diag_router
@@ -132,7 +132,6 @@ def create_app() -> FastAPI:
     app.include_router(auth.router, prefix="/api")
     app.include_router(listings.router, prefix="/api")
     app.include_router(sync.router, prefix="/api")
-    app.include_router(drive.router, prefix="/api")
     app.include_router(health_router.router, prefix="/api")
     app.include_router(bulk_router.router, prefix="/api")
     app.include_router(suggestions_router.router, prefix="/api")

@@ -287,6 +287,20 @@ def m12_video_scanning(engine: Engine) -> None:
         conn.commit()
 
 
+def m13_batch_metadata(engine: Engine) -> None:
+    """Add batch_year and batch_set_brand to scanjob for user-provided overrides."""
+    with engine.connect() as conn:
+        for col, typedef in [
+            ("batch_year", "INTEGER"),
+            ("batch_set_brand", "TEXT"),
+        ]:
+            try:
+                conn.execute(text(f"ALTER TABLE scanjob ADD COLUMN {col} {typedef}"))
+            except Exception:
+                pass
+        conn.commit()
+
+
 MIGRATIONS: list[tuple[int, str, Callable[[Engine], None]]] = [
     (1, "baseline", m1_baseline),
     (2, "add card year/player index", m2_add_card_indexes),
@@ -300,6 +314,7 @@ MIGRATIONS: list[tuple[int, str, Callable[[Engine], None]]] = [
     (10, "storage locations table + card columns", m10_storage_locations),
     (11, "per-scanjob storage tag", m11_scanjob_storage),
     (12, "video scanning fields on scanjob", m12_video_scanning),
+    (13, "batch year and set_brand on scanjob", m13_batch_metadata),
 ]
 
 

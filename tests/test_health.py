@@ -10,7 +10,7 @@ def test_health_returns_check_object():
     assert r.status_code == 200
     body = r.json()
     assert "checks" in body
-    for k in ("db", "google", "drive", "ebay", "claude"):
+    for k in ("db", "google", "ebay", "claude"):
         assert k in body["checks"]
     # DB has to be healthy in tests
     assert body["checks"]["db"]["ok"] is True
