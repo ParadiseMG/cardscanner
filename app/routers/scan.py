@@ -88,6 +88,7 @@ async def upload_video(
             f.write(chunk)
 
     # Create job
+    logger.info("Video upload: label=%r, batch_year=%r, batch_set_brand=%r", label, batch_year, batch_set_brand)
     batch_label = label or "Video scan"
     if batch_set_brand:
         batch_label = f"{batch_year or ''} {batch_set_brand}".strip()
@@ -180,6 +181,8 @@ def job_status(job_id: int) -> dict:
             "source": job.source,
             "extraction_total": job.extraction_total,
             "extraction_done": job.extraction_done,
+            "batch_year": job.batch_year,
+            "batch_set_brand": job.batch_set_brand,
             "started_at": job.started_at.isoformat() if job.started_at else None,
             "finished_at": job.finished_at.isoformat() if job.finished_at else None,
         }
